@@ -1,0 +1,60 @@
+apiVersion: labs.handsonn.dev/v1
+kind: Scenario
+id: hello-shell
+title: Your First Shell
+summary: A 5-minute tour of the lab terminal.
+difficulty: beginner
+tags: [intro, linux]
+duration: 10m
+topic: linux
+issueType: shell
+
+session:
+  ttl: 30m
+  quota:
+    cpu: "2"
+    memory: 4Gi
+    pods: 2
+
+environment:
+  type: linux
+  pods:
+    # netshoot has curl, jq, etc. baked in — see note in 02-debug-microservice
+    # about why we can't `apt-get install` at runtime.
+    - name: shell
+      image: nicolaka/netshoot:latest
+      primary: true
+      command: ["sleep", "infinity"]
+      resources:
+        cpu: "1"
+        memory: 1Gi
+  init:
+    - pod: shell
+      run: echo "lab ready" > /tmp/ready
+
+steps:
+  - id: whoami
+    title: Identify yourself
+    instructions: steps/01-whoami.md
+    verify:
+      run: test "$(whoami)" = "root"
+      successMessage: Correct — you're root inside the sandbox.
+      failureMessage: Run `whoami` and try again.
+
+  - id: list-root
+    title: List the root filesystem
+    instructions: steps/02-list-root.md
+    hint: steps/02-hint.md
+    verify:
+      run: test -f /tmp/listed && grep -q etc /tmp/listed
+      timeout: 15s
+      failureMessage: Save the output of `ls /` to /tmp/listed.
+
+  - id: jq-check
+    title: Use a tool that was pre-installed
+    instructions: steps/03-jq.md
+    verify:
+      run: echo '{"a":1}' | jq -e '.a == 1' >/dev/null
+
+finish:
+  markdown: finish.md

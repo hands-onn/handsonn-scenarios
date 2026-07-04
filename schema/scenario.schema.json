@@ -1,0 +1,149 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://handsonn.dev/schemas/scenario.json",
+  "title": "Scenario",
+  "type": "object",
+  "required": ["apiVersion", "kind", "id", "title", "topic", "issueType", "environment", "steps"],
+  "additionalProperties": false,
+  "properties": {
+    "apiVersion": { "const": "labs.handsonn.dev/v1" },
+    "kind": { "const": "Scenario" },
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9-]{2,63}$",
+      "description": "Stable slug. Lowercase, kebab-case, 3-64 chars."
+    },
+    "title": { "type": "string", "minLength": 3, "maxLength": 100 },
+    "summary": { "type": "string", "maxLength": 280 },
+    "difficulty": { "enum": ["beginner", "intermediate", "advanced"] },
+    "tags": { "type": "array", "items": { "type": "string" }, "maxItems": 12 },
+    "duration": {
+      "type": "string",
+      "pattern": "^[0-9]+(s|m|h)$",
+      "description": "Soft TTL hint shown to the user, e.g. \"30m\"."
+    },
+    "topic": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9-]{1,62}$",
+      "description": "Top-level grouping slug. Must match a topic registered in the platform."
+    },
+    "issueType": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9-]{1,62}$",
+      "description": "Issue type slug under the chosen topic."
+    },
+    "session": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "ttl": { "type": "string", "pattern": "^[0-9]+(s|m|h)$" },
+        "quota": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "cpu": { "type": "string" },
+            "memory": { "type": "string" },
+            "pods": { "type": "integer", "minimum": 1, "maximum": 20 }
+          }
+        }
+      }
+    },
+    "environment": {
+      "type": "object",
+      "required": ["pods"],
+      "additionalProperties": false,
+      "properties": {
+        "type": { "enum": ["linux", "kubernetes"], "default": "linux" },
+        "pods": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 10,
+          "items": { "$ref": "#/$defs/Pod" }
+        },
+        "init": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/InitAction" },
+          "description": "Run once after all pods are Ready."
+        }
+      }
+    },
+    "steps": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/Step" }
+    },
+    "finish": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "markdown": { "type": "string", "description": "Path to finish markdown, relative to scenario dir." }
+      }
+    }
+  },
+  "$defs": {
+    "Pod": {
+      "type": "object",
+      "required": ["name", "image"],
+      "additionalProperties": false,
+      "properties": {
+        "name": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,62}$" },
+        "image": { "type": "string" },
+        "primary": { "type": "boolean", "default": false, "description": "Terminal attaches here. Exactly one pod must be primary." },
+        "command": { "type": "array", "items": { "type": "string" } },
+        "env": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["name", "value"],
+            "properties": { "name": { "type": "string" }, "value": { "type": "string" } }
+          }
+        },
+        "expose": {
+          "type": "array",
+          "items": { "type": "integer", "minimum": 1, "maximum": 65535 },
+          "description": "Ports to expose as a ClusterIP service named after the pod."
+        },
+        "resources": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "cpu": { "type": "string" },
+            "memory": { "type": "string" }
+          }
+        }
+      }
+    },
+    "InitAction": {
+      "type": "object",
+      "required": ["pod", "run"],
+      "additionalProperties": false,
+      "properties": {
+        "pod": { "type": "string" },
+        "run": { "type": "string", "description": "Shell command executed in the pod." }
+      }
+    },
+    "Step": {
+      "type": "object",
+      "required": ["id", "title", "instructions"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,62}$" },
+        "title": { "type": "string", "maxLength": 100 },
+        "instructions": { "type": "string", "description": "Path to step markdown, relative to scenario dir." },
+        "hint": { "type": "string", "description": "Path to hint markdown." },
+        "verify": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "pod": { "type": "string", "description": "Defaults to primary pod." },
+            "run": { "type": "string", "description": "Shell command. exit 0 = pass." },
+            "timeout": { "type": "string", "pattern": "^[0-9]+(s|m)$", "default": "30s" },
+            "successMessage": { "type": "string" },
+            "failureMessage": { "type": "string" }
+          },
+          "required": ["run"]
+        }
+      }
+    }
+  }
+}

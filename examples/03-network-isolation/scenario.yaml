@@ -1,0 +1,64 @@
+apiVersion: labs.handsonn.dev/v1
+kind: Scenario
+id: network-isolation
+title: Verify the Sandbox is Isolated
+summary: Probe the sandbox's egress restrictions. Cloud metadata and RFC1918 should be unreachable; the public internet should still work.
+difficulty: beginner
+tags: [security, networking]
+duration: 10m
+topic: linux
+issueType: networking
+
+session:
+  ttl: 20m
+  quota:
+    cpu: "1"
+    memory: 1Gi
+    pods: 1
+
+environment:
+  type: linux
+  pods:
+    - name: shell
+      image: nicolaka/netshoot:latest
+      primary: true
+      command: ["sleep", "infinity"]
+      resources:
+        cpu: "500m"
+        memory: 512Mi
+
+steps:
+  - id: imds-blocked
+    title: Cloud metadata is unreachable
+    instructions: steps/01-imds.md
+    verify:
+      run: |
+        # We expect this to fail. Inverted exit: pass when curl can't connect.
+        if curl -fsS --max-time 3 http://169.254.169.254/ -o /dev/null 2>&1; then
+          echo "ERROR: IMDS was reachable — NetworkPolicy isn't enforcing"
+          exit 1
+        fi
+        exit 0
+      successMessage: Confirmed — egress to 169.254.0.0/16 is blocked.
+      failureMessage: IMDS responded. Either the NetworkPolicy isn't applied, or the CNI doesn't enforce it (kindnet doesn't).
+
+  - id: rfc1918-blocked
+    title: Internal cluster ranges are unreachable
+    instructions: steps/02-rfc1918.md
+    verify:
+      run: |
+        # 10.0.0.1 should be unreachable on a properly isolated sandbox.
+        if curl -fsS --max-time 3 http://10.0.0.1/ -o /dev/null 2>&1; then
+          echo "ERROR: 10.0.0.1 was reachable"
+          exit 1
+        fi
+        exit 0
+
+  - id: internet-allowed
+    title: The public internet still works
+    instructions: steps/03-internet.md
+    verify:
+      run: curl -fsS --max-time 5 https://example.com/ -o /dev/null
+
+finish:
+  markdown: finish.md
