@@ -9,9 +9,16 @@ duration: 40m
 topic: linux
 issueType: networking
 
-# Two pods talking over SSH. sshserver accepts a starter password so
-# the user can bootstrap pubkey auth exactly the way you'd do it on a
-# fresh machine.
+# Two pods talking over SSH. The server runs sshd on 2222 and accepts a
+# starter password so the user can bootstrap pubkey auth the way you'd
+# do it on a fresh machine.
+#
+# The lab sandbox drops ALL Linux capabilities by default, but sshd's
+# mandatory privilege separation needs SETUID/SETGID/SYS_CHROOT. The
+# sshserver pod requests exactly those via `addCapabilities` (an
+# allowlisted set the gateway permits). The client pod stays fully
+# locked down. sshd itself is started from an init action, since the
+# sandbox forces `sleep infinity` as the entrypoint.
 session:
   ttl: 60m
   quota:
@@ -31,44 +38,50 @@ environment:
         cpu: "500m"
         memory: 512Mi
 
-    # sshd on 2222. linuxserver's image reads USER_NAME / USER_PASSWORD /
-    # PASSWORD_ACCESS env at boot to seed accounts + auth.
+    # The SSH target. sshd is started by the init action below and needs
+    # these caps: SETUID/SETGID/SYS_CHROOT for privilege separation
+    # (setuid to the login user + chroot to /var/empty), and CHOWN so the
+    # init script can hand /home/handsonn to the handsonn user — busybox
+    # adduser can't chown it in the sandbox, so it lands root-owned.
     - name: sshserver
-      image: lscr.io/linuxserver/openssh-server:latest
+      image: nicolaka/netshoot:latest
+      command: ["sleep", "infinity"]
       expose: [2222]
-      env:
-        - name: PUID
-          value: "1000"
-        - name: PGID
-          value: "1000"
-        - name: TZ
-          value: "UTC"
-        - name: USER_NAME
-          value: "handsonn"
-        # Starter password ONLY for the pubkey-bootstrap step. Once
-        # authorized_keys is populated, password auth is no longer used.
-        - name: USER_PASSWORD
-          value: "labpass"
-        - name: PASSWORD_ACCESS
-          value: "true"
-        - name: SUDO_ACCESS
-          value: "false"
+      addCapabilities: [SETUID, SETGID, SYS_CHROOT, CHOWN]
       resources:
         cpu: "500m"
         memory: 512Mi
 
   init:
-    # Generate a keypair + a sample payload on the client side. The
-    # public key is what the user will install on the server.
+    # Server: install + start sshd, create the handsonn user with a
+    # starter password, allow password auth for the bootstrap step.
+    - pod: sshserver
+      run: |
+        set -e
+        apk add --no-cache openssh openssh-server rsync >/dev/null 2>&1
+        adduser -D handsonn 2>/dev/null || true
+        echo 'handsonn:labpass' | chpasswd
+        ssh-keygen -A >/dev/null            # host keys
+        cat > /etc/ssh/sshd_config_lab <<'EOF'
+        Port 2222
+        PasswordAuthentication yes
+        PubkeyAuthentication yes
+        PermitRootLogin no
+        Subsystem sftp internal-sftp
+        EOF
+        # busybox adduser leaves /home/handsonn root-owned in the sandbox;
+        # hand it to the user so they can create ~/.ssh in the pubkey step.
+        chown handsonn:handsonn /home/handsonn
+        /usr/sbin/sshd -f /etc/ssh/sshd_config_lab
+
+    # Client: generate a keypair + sample payload, install helpers.
     - pod: client
       run: |
         set -e
+        apk add --no-cache openssh-client rsync sshpass >/dev/null 2>&1
         mkdir -p /root/.ssh && chmod 700 /root/.ssh
         ssh-keygen -t ed25519 -N '' -C client -f /root/.ssh/id_ed25519 >/dev/null
         chmod 600 /root/.ssh/id_ed25519
-        # netshoot ships ssh-copy-id + sshpass under openssh-client-common;
-        # install if missing.
-        apk add --no-cache openssh-client rsync sshpass >/dev/null 2>&1 || true
         mkdir -p /work && for i in a b c; do echo "$i-payload" > /work/$i.txt; done
 
 steps:
@@ -77,8 +90,6 @@ steps:
     instructions: steps/01-password-first.md
     hint: steps/01-hint.md
     verify:
-      # Prove password auth works. Using sshpass to avoid interactive
-      # tty in the checker.
       run: |
         sshpass -p labpass ssh \
           -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
@@ -92,8 +103,6 @@ steps:
     instructions: steps/02-install-pubkey.md
     hint: steps/02-hint.md
     verify:
-      # After installing the pubkey, we should be able to SSH WITHOUT
-      # password. Explicitly disable password to make sure it's pubkey.
       run: |
         ssh \
           -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
@@ -110,9 +119,9 @@ steps:
       run: |
         ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
           -i /root/.ssh/id_ed25519 -p 2222 handsonn@sshserver \
-          'test -f /config/a.txt && grep -q a-payload /config/a.txt'
+          'test -f /home/handsonn/a.txt && grep -q a-payload /home/handsonn/a.txt'
       timeout: 20s
-      failureMessage: scp /work/a.txt to handsonn@sshserver:/config/a.txt (port 2222).
+      failureMessage: scp /work/a.txt to handsonn@sshserver:/home/handsonn/a.txt (port 2222).
 
   - id: rsync-dir
     title: Sync a directory with rsync
@@ -121,9 +130,9 @@ steps:
       run: |
         ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
           -i /root/.ssh/id_ed25519 -p 2222 handsonn@sshserver \
-          'test -f /config/work/a.txt && test -f /config/work/b.txt && test -f /config/work/c.txt'
+          'test -f /home/handsonn/work/a.txt && test -f /home/handsonn/work/b.txt && test -f /home/handsonn/work/c.txt'
       timeout: 25s
-      failureMessage: rsync /work into handsonn@sshserver:/config/ so files land in /config/work/.
+      failureMessage: rsync /work into handsonn@sshserver:/home/handsonn/ so files land in /home/handsonn/work/.
 
   - id: rsync-delete
     title: --delete, safely
@@ -132,9 +141,9 @@ steps:
       run: |
         ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
           -i /root/.ssh/id_ed25519 -p 2222 handsonn@sshserver \
-          '! test -f /config/work/a.txt && test -f /config/work/b.txt'
+          '! test -f /home/handsonn/work/a.txt && test -f /home/handsonn/work/b.txt'
       timeout: 25s
-      failureMessage: Delete /work/a.txt locally, then rsync -a --delete /work/ to handsonn@sshserver:/config/work/. Server-side a.txt should be gone.
+      failureMessage: Delete /work/a.txt locally, then rsync -a --delete /work/ to handsonn@sshserver:/home/handsonn/work/. Server-side a.txt should be gone.
 
 finish:
   markdown: finish.md

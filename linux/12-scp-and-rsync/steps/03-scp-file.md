@@ -3,12 +3,12 @@
 `scp` = "secure copy" — a thin wrapper over SSH that copies files
 instead of opening a shell.
 
-Copy `/work/a.txt` to `handsonn@sshserver:/config/a.txt`:
+Copy `/work/a.txt` to `handsonn@sshserver:/home/handsonn/a.txt`:
 
 ```bash
 scp -P 2222 -i /root/.ssh/id_ed25519 \
   -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-  /work/a.txt handsonn@sshserver:/config/a.txt
+  /work/a.txt handsonn@sshserver:/home/handsonn/a.txt
 ```
 
 Note the **capital `-P`** for the port. (SSH uses lowercase `-p`. Yes,
@@ -18,7 +18,7 @@ You can copy in either direction:
 
 ```bash
 # Local → remote
-scp -P 2222 -i /root/.ssh/id_ed25519 /work/a.txt handsonn@sshserver:/config/
+scp -P 2222 -i /root/.ssh/id_ed25519 /work/a.txt handsonn@sshserver:/home/handsonn/
 
 # Remote → local
 scp -P 2222 -i /root/.ssh/id_ed25519 handsonn@sshserver:/etc/hostname /tmp/remote-hostname

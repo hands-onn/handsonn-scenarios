@@ -20,7 +20,7 @@ At the prompt, type `labpass`. Take a look around:
 
 ```bash
 whoami       # handsonn
-ls -la ~     # /config is $HOME here
+ls -la ~     # /home/handsonn is $HOME here
 exit
 ```
 

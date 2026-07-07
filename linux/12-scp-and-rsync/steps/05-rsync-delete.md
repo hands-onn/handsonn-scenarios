@@ -14,19 +14,19 @@ this time we want contents-into-contents:
 
 ```bash
 SSH_CMD="ssh -p 2222 -i /root/.ssh/id_ed25519 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
-rsync -a --delete -e "$SSH_CMD" /work/ handsonn@sshserver:/config/work/
+rsync -a --delete -e "$SSH_CMD" /work/ handsonn@sshserver:/home/handsonn/work/
 ```
 
 Confirm `a.txt` is gone from the destination:
 
 ```bash
-ssh -p 2222 -i /root/.ssh/id_ed25519 handsonn@sshserver 'ls /config/work'
+ssh -p 2222 -i /root/.ssh/id_ed25519 handsonn@sshserver 'ls /home/handsonn/work'
 ```
 
 `--delete` is powerful and dangerous. **Always dry-run first**:
 
 ```bash
-rsync -a --delete -n -v -e "$SSH_CMD" /work/ handsonn@sshserver:/config/work/
+rsync -a --delete -n -v -e "$SSH_CMD" /work/ handsonn@sshserver:/home/handsonn/work/
 ```
 
 The `-n` (or `--dry-run`) shows what *would* happen without touching

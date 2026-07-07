@@ -4,12 +4,12 @@
 changed data crosses the wire — and can resume interrupted transfers.
 It's the right tool for anything larger than a single file.
 
-Sync `/work` to `/config/work` on the remote:
+Sync `/work` to `/home/handsonn/work` on the remote:
 
 ```bash
 rsync -a \
   -e "ssh -p 2222 -i /root/.ssh/id_ed25519 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null" \
-  /work handsonn@sshserver:/config/
+  /work handsonn@sshserver:/home/handsonn/
 ```
 
 Flag walk-through:
@@ -21,7 +21,7 @@ Flag walk-through:
 - `/work` (no trailing slash) — copies the directory itself.
   `/work/` (with trailing slash) — copies the *contents*. This is the
   single most common rsync bug. Here we want the directory itself, so
-  no trailing slash — the result is `/config/work/{a,b,c}.txt`.
+  no trailing slash — the result is `/home/handsonn/work/{a,b,c}.txt`.
 
 Extras worth knowing:
 - `-v` (verbose), `-P` (progress + resume), `-n` (dry run — SAFE).
