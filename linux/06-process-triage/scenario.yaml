@@ -1,0 +1,73 @@
+apiVersion: labs.handsonn.dev/v1
+kind: Scenario
+id: process-triage
+title: Find and Kill a Runaway Process
+summary: A hidden process is burning CPU. Find it and stop it.
+difficulty: intermediate
+tags: [linux, processes, signals]
+duration: 15m
+topic: linux
+issueType: shell
+
+session:
+  ttl: 30m
+  quota:
+    cpu: "2"
+    memory: 2Gi
+    pods: 1
+
+environment:
+  type: linux
+  pods:
+    - name: shell
+      image: nicolaka/netshoot:latest
+      primary: true
+      command: ["sleep", "infinity"]
+      resources:
+        cpu: "1"
+        memory: 512Mi
+  init:
+    # Launch a CPU-burning process with an unfamiliar name so the user
+    # has to hunt for it. Detached so it survives shell exec churn.
+    - pod: shell
+      run: |
+        nohup sh -c 'exec -a runaway-worker sh -c "while true; do :; done"' \
+          >/dev/null 2>&1 &
+        # Give it a moment to actually start.
+        sleep 1
+
+steps:
+  - id: identify
+    title: Identify the runaway
+    instructions: steps/01-identify.md
+    verify:
+      # The user must write the PID to /tmp/pid — we then confirm that
+      # PID matches something whose command contains "runaway-worker".
+      run: |
+        pid=$(cat /tmp/pid 2>/dev/null | tr -d '[:space:]')
+        test -n "$pid" && grep -q runaway-worker /proc/$pid/cmdline 2>/dev/null
+      failureMessage: Write the runaway process's PID to /tmp/pid. Try `ps auxf` or `ps -eo pid,pcpu,comm --sort=-pcpu | head`.
+
+  - id: send-term
+    title: Ask it nicely to stop
+    instructions: steps/02-send-term.md
+    hint: steps/02-hint.md
+    verify:
+      # For this lab, "asked nicely" means: the user ran `kill <pid>`
+      # (SIGTERM). But because the runaway ignores nothing, it likely
+      # died — that's fine; either way we treat this step as "user
+      # performed a SIGTERM". Confirm by checking user wrote /tmp/termed.
+      run: test -f /tmp/termed
+
+  - id: force-kill
+    title: If it's still alive, force it
+    instructions: steps/03-force-kill.md
+    verify:
+      # Process must be gone.
+      run: |
+        pid=$(cat /tmp/pid | tr -d '[:space:]')
+        ! test -d /proc/$pid
+      failureMessage: The runaway process is still running. Use `kill -9 <pid>`.
+
+finish:
+  markdown: finish.md

@@ -1,0 +1,71 @@
+apiVersion: labs.handsonn.dev/v1
+kind: Scenario
+id: file-copy-move
+title: Copy and Move Files Safely
+summary: Learn cp and mv, including the traps that lose data.
+difficulty: beginner
+tags: [intro, linux, files]
+duration: 15m
+topic: linux
+issueType: shell
+
+session:
+  ttl: 30m
+  quota:
+    cpu: "2"
+    memory: 2Gi
+    pods: 1
+
+environment:
+  type: linux
+  pods:
+    - name: shell
+      image: nicolaka/netshoot:latest
+      primary: true
+      command: ["sleep", "infinity"]
+      resources:
+        cpu: "500m"
+        memory: 512Mi
+  init:
+    # Seed a small tree so the user has something to copy around.
+    - pod: shell
+      run: |
+        mkdir -p /work/src /work/dst
+        echo "hello" > /work/src/one.txt
+        echo "world" > /work/src/two.txt
+        mkdir /work/src/nested && echo "deep" > /work/src/nested/three.txt
+
+steps:
+  - id: cp-file
+    title: Copy a single file
+    instructions: steps/01-cp-file.md
+    verify:
+      run: test -f /work/dst/one.txt && diff /work/src/one.txt /work/dst/one.txt
+      successMessage: File copied and contents match.
+      failureMessage: Copy /work/src/one.txt to /work/dst/one.txt.
+
+  - id: cp-recursive
+    title: Copy a directory recursively
+    instructions: steps/02-cp-recursive.md
+    hint: steps/02-hint.md
+    verify:
+      run: test -f /work/dst/nested/three.txt
+
+  - id: mv-rename
+    title: Rename with mv
+    instructions: steps/03-mv-rename.md
+    verify:
+      # `mv` should leave nothing at the old path.
+      run: test -f /work/src/renamed.txt && ! test -f /work/src/two.txt
+      failureMessage: Rename /work/src/two.txt to /work/src/renamed.txt using mv.
+
+  - id: no-clobber
+    title: Prevent overwriting with cp -n
+    instructions: steps/04-no-clobber.md
+    verify:
+      # After `cp -n`, dst/one.txt must still contain the original "hello".
+      run: grep -q "^hello$" /work/dst/one.txt
+      failureMessage: Use `cp -n` so the existing file is not overwritten.
+
+finish:
+  markdown: finish.md

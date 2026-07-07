@@ -1,12 +1,24 @@
 # hands-onn / scenarios
 
-Public catalog of interactive lab scenarios for **Hands-Onn**. Each
-scenario is a directory under [examples/](examples/) containing:
+Public catalog of interactive lab scenarios for **Hands-Onn**. Layout:
 
-- `scenario.yaml` — metadata + pod spec + step list (validated against
-  [schema/scenario.schema.json](schema/scenario.schema.json))
-- `steps/*.md` — one markdown file per step (instructions + optional hints)
-- `finish.md` — shown when the user completes the last step
+```text
+<topic>/<scenario>/
+    scenario.yaml   — metadata + pod spec + step list
+    steps/*.md      — one markdown file per step (instructions + optional hints)
+    finish.md       — shown when the user completes the last step
+```
+
+The **topic directory name must match `scenario.topic`** — the gateway
+validates this at load time.
+
+Current topics:
+
+- `linux/` — shell + networking scenarios.
+- `database/` — SQL + debugging scenarios.
+
+Adding a new top-level topic requires a DB migration in the gateway
+repo. Adding a new issue type under an existing topic: same.
 
 ## How it's consumed
 
@@ -36,7 +48,7 @@ scenarios.
 
 ```bash
 pipx install check-jsonschema     # once
-check-jsonschema --schemafile schema/scenario.schema.json examples/*/scenario.yaml
+check-jsonschema --schemafile schema/scenario.schema.json */*/scenario.yaml
 ```
 
 ## Not in this repo

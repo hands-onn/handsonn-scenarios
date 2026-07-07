@@ -1,0 +1,73 @@
+apiVersion: labs.handsonn.dev/v1
+kind: Scenario
+id: ssh-keys
+title: SSH Keys, End to End
+summary: Generate a keypair, inspect the fingerprint, understand the file layout.
+difficulty: intermediate
+tags: [linux, ssh, keys]
+duration: 20m
+topic: linux
+issueType: networking
+
+session:
+  ttl: 30m
+  quota:
+    cpu: "2"
+    memory: 2Gi
+    pods: 1
+
+environment:
+  type: linux
+  pods:
+    - name: shell
+      image: nicolaka/netshoot:latest
+      primary: true
+      command: ["sleep", "infinity"]
+      resources:
+        cpu: "500m"
+        memory: 512Mi
+  init:
+    - pod: shell
+      run: mkdir -p /root/.ssh && chmod 700 /root/.ssh
+
+steps:
+  - id: generate
+    title: Generate an ed25519 keypair
+    instructions: steps/01-generate.md
+    verify:
+      run: |
+        test -f /root/.ssh/id_ed25519 \
+          && test -f /root/.ssh/id_ed25519.pub \
+          && head -1 /root/.ssh/id_ed25519.pub | grep -q '^ssh-ed25519'
+      failureMessage: /root/.ssh/id_ed25519 and .pub must exist; the .pub file must start with "ssh-ed25519".
+
+  - id: inspect
+    title: Inspect the fingerprint
+    instructions: steps/02-inspect.md
+    hint: steps/02-hint.md
+    verify:
+      # Save the fingerprint to /tmp/fingerprint. Must match SHA256:...
+      run: grep -qE '^SHA256:' /tmp/fingerprint 2>/dev/null
+      failureMessage: Save the output of `ssh-keygen -lf id_ed25519.pub` to /tmp/fingerprint.
+
+  - id: authorized-keys
+    title: Set up authorized_keys
+    instructions: steps/03-authorized-keys.md
+    verify:
+      run: |
+        test -f /root/.ssh/authorized_keys \
+          && diff /root/.ssh/id_ed25519.pub /root/.ssh/authorized_keys
+      failureMessage: /root/.ssh/authorized_keys must contain your public key. Copy id_ed25519.pub into it.
+
+  - id: permissions
+    title: Verify permissions
+    instructions: steps/04-permissions.md
+    verify:
+      run: |
+        [ "$(stat -c '%a' /root/.ssh)" = "700" ] \
+        && [ "$(stat -c '%a' /root/.ssh/id_ed25519)" = "600" ] \
+        && [ "$(stat -c '%a' /root/.ssh/authorized_keys)" = "600" ]
+      failureMessage: .ssh must be 700, id_ed25519 must be 600, authorized_keys must be 600.
+
+finish:
+  markdown: finish.md

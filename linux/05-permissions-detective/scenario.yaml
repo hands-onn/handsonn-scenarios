@@ -1,0 +1,80 @@
+apiVersion: labs.handsonn.dev/v1
+kind: Scenario
+id: permissions-detective
+title: Fix a Broken Permissions Layout
+summary: A misconfigured ~/.ssh directory. Fix it with chmod and chown.
+difficulty: beginner
+tags: [linux, permissions, ssh]
+duration: 15m
+topic: linux
+issueType: shell
+
+session:
+  ttl: 30m
+  quota:
+    cpu: "2"
+    memory: 2Gi
+    pods: 1
+
+environment:
+  type: linux
+  pods:
+    - name: shell
+      image: nicolaka/netshoot:latest
+      primary: true
+      command: ["sleep", "infinity"]
+      resources:
+        cpu: "500m"
+        memory: 512Mi
+  init:
+    # Create a user, then deliberately break the permissions ssh
+    # expects. The user must restore each one to the correct value.
+    - pod: shell
+      run: |
+        set -e
+        adduser -D alice 2>/dev/null || useradd -m alice
+        mkdir -p /home/alice/.ssh
+        echo "ssh-rsa AAAA... test-key" > /home/alice/.ssh/authorized_keys
+        chown -R root:root /home/alice/.ssh
+        chmod 777 /home/alice/.ssh
+        chmod 666 /home/alice/.ssh/authorized_keys
+
+steps:
+  - id: inspect
+    title: Inspect the broken layout
+    instructions: steps/01-inspect.md
+    verify:
+      # Passive step — just requires the user to have read the file.
+      run: test -f /tmp/inspected
+      failureMessage: Run the ls -la command shown and then `touch /tmp/inspected` when you've read the output.
+
+  - id: fix-owner
+    title: Fix ownership
+    instructions: steps/02-fix-owner.md
+    verify:
+      run: |
+        owner=$(stat -c '%U' /home/alice/.ssh/authorized_keys)
+        test "$owner" = "alice"
+      failureMessage: authorized_keys must be owned by alice, not root.
+
+  - id: fix-dir-mode
+    title: Fix the .ssh directory mode
+    instructions: steps/03-fix-dir-mode.md
+    hint: steps/03-hint.md
+    verify:
+      run: |
+        mode=$(stat -c '%a' /home/alice/.ssh)
+        test "$mode" = "700"
+      failureMessage: /home/alice/.ssh must be mode 700.
+
+  - id: fix-file-mode
+    title: Fix the authorized_keys file mode
+    instructions: steps/04-fix-file-mode.md
+    verify:
+      run: |
+        mode=$(stat -c '%a' /home/alice/.ssh/authorized_keys)
+        test "$mode" = "600"
+      failureMessage: authorized_keys must be mode 600.
+
+finish:
+  markdown: finish.md

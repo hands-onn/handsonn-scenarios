@@ -1,0 +1,70 @@
+apiVersion: labs.handsonn.dev/v1
+kind: Scenario
+id: dns-mystery
+title: Debug a Broken DNS Lookup
+summary: Fix hostname resolution using dig, /etc/hosts, and /etc/resolv.conf.
+difficulty: intermediate
+tags: [linux, networking, dns]
+duration: 20m
+topic: linux
+issueType: networking
+
+session:
+  ttl: 30m
+  quota:
+    cpu: "2"
+    memory: 2Gi
+    pods: 1
+
+environment:
+  type: linux
+  pods:
+    - name: shell
+      image: nicolaka/netshoot:latest
+      primary: true
+      command: ["sleep", "infinity"]
+      resources:
+        cpu: "500m"
+        memory: 512Mi
+  init:
+    # Poison /etc/hosts with a bogus entry pointing to a real-looking
+    # host at a black-hole IP. The user must remove it.
+    - pod: shell
+      run: |
+        echo '127.99.99.99 handsonn.local' >> /etc/hosts
+
+steps:
+  - id: resolve-external
+    title: Resolve an external hostname
+    instructions: steps/01-resolve-external.md
+    verify:
+      # Any lookup that returns a real A record works. example.com is
+      # a stable target that's always resolvable.
+      run: dig +short A example.com | grep -qE '^[0-9]+\.'
+      failureMessage: dig on example.com returned no A record. Check /etc/resolv.conf.
+
+  - id: find-poison
+    title: Find the poisoned entry
+    instructions: steps/02-find-poison.md
+    hint: steps/02-hint.md
+    verify:
+      # User must save the bogus IP to /tmp/bogus.
+      run: grep -q "127.99.99.99" /tmp/bogus 2>/dev/null
+      failureMessage: Grep /etc/hosts for the entry that maps handsonn.local to a bogus IP and write the IP to /tmp/bogus.
+
+  - id: remove-poison
+    title: Remove the entry from /etc/hosts
+    instructions: steps/03-remove-poison.md
+    verify:
+      run: ! grep -q "127.99.99.99" /etc/hosts
+      failureMessage: The 127.99.99.99 entry must be removed from /etc/hosts.
+
+  - id: verify-precedence
+    title: Understand resolution order
+    instructions: steps/04-verify-precedence.md
+    verify:
+      run: grep -qE '^\s*hosts:' /etc/nsswitch.conf 2>/dev/null || test -f /tmp/precedence-noted
+      failureMessage: Note the resolution order — either verify /etc/nsswitch.conf's `hosts:` line exists, or `touch /tmp/precedence-noted`.
+
+finish:
+  markdown: finish.md

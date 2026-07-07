@@ -1,0 +1,140 @@
+apiVersion: labs.handsonn.dev/v1
+kind: Scenario
+id: scp-and-rsync
+title: Copy Files Between Hosts with scp and rsync
+summary: Real cross-host workflow — password bootstrap, install pubkey, then scp and rsync between two pods.
+difficulty: intermediate
+tags: [linux, ssh, scp, rsync]
+duration: 40m
+topic: linux
+issueType: networking
+
+# Two pods talking over SSH. sshserver accepts a starter password so
+# the user can bootstrap pubkey auth exactly the way you'd do it on a
+# fresh machine.
+session:
+  ttl: 60m
+  quota:
+    cpu: "2"
+    memory: 2Gi
+    pods: 2
+
+environment:
+  type: linux
+  pods:
+    # The pod the user has a terminal on.
+    - name: client
+      image: nicolaka/netshoot:latest
+      primary: true
+      command: ["sleep", "infinity"]
+      resources:
+        cpu: "500m"
+        memory: 512Mi
+
+    # sshd on 2222. linuxserver's image reads USER_NAME / USER_PASSWORD /
+    # PASSWORD_ACCESS env at boot to seed accounts + auth.
+    - name: sshserver
+      image: lscr.io/linuxserver/openssh-server:latest
+      expose: [2222]
+      env:
+        - name: PUID
+          value: "1000"
+        - name: PGID
+          value: "1000"
+        - name: TZ
+          value: "UTC"
+        - name: USER_NAME
+          value: "handsonn"
+        # Starter password ONLY for the pubkey-bootstrap step. Once
+        # authorized_keys is populated, password auth is no longer used.
+        - name: USER_PASSWORD
+          value: "labpass"
+        - name: PASSWORD_ACCESS
+          value: "true"
+        - name: SUDO_ACCESS
+          value: "false"
+      resources:
+        cpu: "500m"
+        memory: 512Mi
+
+  init:
+    # Generate a keypair + a sample payload on the client side. The
+    # public key is what the user will install on the server.
+    - pod: client
+      run: |
+        set -e
+        mkdir -p /root/.ssh && chmod 700 /root/.ssh
+        ssh-keygen -t ed25519 -N '' -C client -f /root/.ssh/id_ed25519 >/dev/null
+        chmod 600 /root/.ssh/id_ed25519
+        # netshoot ships ssh-copy-id + sshpass under openssh-client-common;
+        # install if missing.
+        apk add --no-cache openssh-client rsync sshpass >/dev/null 2>&1 || true
+        mkdir -p /work && for i in a b c; do echo "$i-payload" > /work/$i.txt; done
+
+steps:
+  - id: password-first
+    title: First contact — password login
+    instructions: steps/01-password-first.md
+    hint: steps/01-hint.md
+    verify:
+      # Prove password auth works. Using sshpass to avoid interactive
+      # tty in the checker.
+      run: |
+        sshpass -p labpass ssh \
+          -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+          -o PreferredAuthentications=password -o PubkeyAuthentication=no \
+          -p 2222 handsonn@sshserver 'echo ok' 2>/dev/null | grep -q ok
+      timeout: 20s
+      failureMessage: Password login as handsonn@sshserver (port 2222) with password "labpass" failed. Is the server pod up?
+
+  - id: install-pubkey
+    title: Install your public key on the server
+    instructions: steps/02-install-pubkey.md
+    hint: steps/02-hint.md
+    verify:
+      # After installing the pubkey, we should be able to SSH WITHOUT
+      # password. Explicitly disable password to make sure it's pubkey.
+      run: |
+        ssh \
+          -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+          -o PreferredAuthentications=publickey -o PasswordAuthentication=no \
+          -i /root/.ssh/id_ed25519 \
+          -p 2222 handsonn@sshserver 'echo ok' 2>/dev/null | grep -q ok
+      timeout: 20s
+      failureMessage: Pubkey auth to handsonn@sshserver failed. Ensure ~handsonn/.ssh/authorized_keys on the server contains your id_ed25519.pub and has mode 600, and .ssh is mode 700.
+
+  - id: scp-file
+    title: Copy a single file with scp
+    instructions: steps/03-scp-file.md
+    verify:
+      run: |
+        ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+          -i /root/.ssh/id_ed25519 -p 2222 handsonn@sshserver \
+          'test -f /config/a.txt && grep -q a-payload /config/a.txt'
+      timeout: 20s
+      failureMessage: scp /work/a.txt to handsonn@sshserver:/config/a.txt (port 2222).
+
+  - id: rsync-dir
+    title: Sync a directory with rsync
+    instructions: steps/04-rsync-dir.md
+    verify:
+      run: |
+        ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+          -i /root/.ssh/id_ed25519 -p 2222 handsonn@sshserver \
+          'test -f /config/work/a.txt && test -f /config/work/b.txt && test -f /config/work/c.txt'
+      timeout: 25s
+      failureMessage: rsync /work into handsonn@sshserver:/config/ so files land in /config/work/.
+
+  - id: rsync-delete
+    title: --delete, safely
+    instructions: steps/05-rsync-delete.md
+    verify:
+      run: |
+        ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+          -i /root/.ssh/id_ed25519 -p 2222 handsonn@sshserver \
+          '! test -f /config/work/a.txt && test -f /config/work/b.txt'
+      timeout: 25s
+      failureMessage: Delete /work/a.txt locally, then rsync -a --delete /work/ to handsonn@sshserver:/config/work/. Server-side a.txt should be gone.
+
+finish:
+  markdown: finish.md

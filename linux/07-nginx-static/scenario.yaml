@@ -1,0 +1,75 @@
+apiVersion: labs.handsonn.dev/v1
+kind: Scenario
+id: nginx-static
+title: Install nginx and Serve a Static Page
+summary: apt-get nginx, edit the config, drop an index.html, verify with curl.
+difficulty: beginner
+tags: [linux, nginx, web]
+duration: 20m
+topic: linux
+issueType: shell
+
+session:
+  ttl: 45m
+  quota:
+    cpu: "2"
+    memory: 2Gi
+    pods: 1
+
+environment:
+  type: linux
+  pods:
+    - name: web
+      # Debian-slim so `apt-get install nginx` works. netshoot is Alpine
+      # (uses apk) and doesn't have nginx's package bundle.
+      image: debian:12-slim
+      primary: true
+      # Keep the pod alive; nginx is started by the user, not the entrypoint.
+      command: ["sleep", "infinity"]
+      resources:
+        cpu: "1"
+        memory: 512Mi
+  init:
+    - pod: web
+      # Update the apt cache so `apt-get install` completes without network
+      # spin-up during the exercise. The install itself is up to the user.
+      run: apt-get update -q >/dev/null
+
+steps:
+  - id: install
+    title: Install nginx
+    instructions: steps/01-install.md
+    verify:
+      run: command -v nginx
+      failureMessage: nginx binary not found. Try `apt-get install -y nginx`.
+
+  - id: configure-port
+    title: Reconfigure nginx to listen on 8080
+    instructions: steps/02-configure-port.md
+    hint: steps/02-hint.md
+    verify:
+      run: |
+        grep -qE '^\s*listen\s+8080\s*;' /etc/nginx/sites-enabled/default \
+          || grep -qE '^\s*listen\s+8080\s*;' /etc/nginx/nginx.conf
+      failureMessage: The default site must listen on port 8080, not 80. Edit /etc/nginx/sites-enabled/default.
+
+  - id: index
+    title: Drop an index.html
+    instructions: steps/03-index.md
+    verify:
+      run: grep -q "Hello from handsonn" /var/www/html/index.html
+      failureMessage: /var/www/html/index.html must contain the text "Hello from handsonn".
+
+  - id: start
+    title: Start nginx and curl it
+    instructions: steps/04-start.md
+    verify:
+      # nginx should be up on 8080 and serving the index. Give the daemon
+      # up to a few hundred ms to bind.
+      run: |
+        curl -sf http://127.0.0.1:8080 | grep -q "Hello from handsonn"
+      timeout: 10s
+      failureMessage: curl to localhost:8080 did not return the expected content. Is nginx running?
+
+finish:
+  markdown: finish.md

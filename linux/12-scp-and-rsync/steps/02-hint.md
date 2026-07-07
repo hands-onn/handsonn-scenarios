@@ -1,0 +1,1 @@
+If pubkey auth fails, check permissions on the server side. From the client: `sshpass -p labpass ssh -p 2222 handsonn@sshserver 'ls -la ~/.ssh && cat ~/.ssh/authorized_keys'`. The dir must be 700, the file 600, both owned by handsonn.

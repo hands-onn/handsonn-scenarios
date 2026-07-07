@@ -1,0 +1,66 @@
+apiVersion: labs.handsonn.dev/v1
+kind: Scenario
+id: openssl-certs
+title: Inspect and Generate Certificates with openssl
+summary: Read a cert's fields, generate a CSR, sign it with your own CA.
+difficulty: advanced
+tags: [linux, openssl, tls, pki]
+duration: 30m
+topic: linux
+issueType: networking
+
+session:
+  ttl: 60m
+  quota:
+    cpu: "2"
+    memory: 2Gi
+    pods: 1
+
+environment:
+  type: linux
+  pods:
+    - name: shell
+      image: nicolaka/netshoot:latest
+      primary: true
+      command: ["sleep", "infinity"]
+      resources:
+        cpu: "500m"
+        memory: 512Mi
+  init:
+    - pod: shell
+      run: |
+        mkdir -p /pki
+
+steps:
+  - id: create-ca
+    title: Create a mini root CA
+    instructions: steps/01-create-ca.md
+    verify:
+      run: |
+        test -f /pki/ca.key && test -f /pki/ca.crt \
+          && openssl x509 -in /pki/ca.crt -noout -subject | grep -q "CN\s*=\s*Handsonn"
+      failureMessage: /pki/ca.key + /pki/ca.crt must exist, with CN=Handsonn on the CA cert.
+
+  - id: csr
+    title: Generate a CSR for a server
+    instructions: steps/02-csr.md
+    hint: steps/02-hint.md
+    verify:
+      run: |
+        test -f /pki/server.key && test -f /pki/server.csr \
+          && openssl req -in /pki/server.csr -noout -subject | grep -q "CN\s*=\s*api.handsonn.lab"
+      failureMessage: /pki/server.key + /pki/server.csr with subject CN=api.handsonn.lab required.
+
+  - id: sign
+    title: Sign the CSR with your CA
+    instructions: steps/03-sign.md
+    verify:
+      # The resulting cert must chain to our CA and have the right CN.
+      run: |
+        test -f /pki/server.crt \
+          && openssl verify -CAfile /pki/ca.crt /pki/server.crt | grep -q "OK$" \
+          && openssl x509 -in /pki/server.crt -noout -issuer | grep -q "CN\s*=\s*Handsonn"
+      failureMessage: server.crt must verify against ca.crt and have Issuer CN=Handsonn.
+
+finish:
+  markdown: finish.md

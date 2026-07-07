@@ -1,0 +1,95 @@
+apiVersion: labs.handsonn.dev/v1
+kind: Scenario
+id: tls-debug
+title: Debug an "Unable to Verify Certificate" Error
+summary: Use openssl s_client and curl to trace TLS handshake failures.
+difficulty: advanced
+tags: [linux, openssl, tls, debugging]
+duration: 30m
+topic: linux
+issueType: networking
+
+session:
+  ttl: 60m
+  quota:
+    cpu: "2"
+    memory: 2Gi
+    pods: 1
+
+environment:
+  type: linux
+  pods:
+    - name: shell
+      image: nicolaka/netshoot:latest
+      primary: true
+      command: ["sleep", "infinity"]
+      resources:
+        cpu: "1"
+        memory: 512Mi
+  init:
+    # Install nginx locally and serve HTTPS with a cert whose CN doesn't
+    # match the hostname we'll query. That's the classic "unable to
+    # verify" failure mode.
+    - pod: shell
+      run: |
+        apk add --no-cache nginx openssl >/dev/null 2>&1 || true
+        mkdir -p /etc/nginx/certs /etc/nginx/http.d /var/www/html
+        openssl req -x509 -newkey rsa:2048 -nodes \
+          -keyout /etc/nginx/certs/server.key \
+          -out /etc/nginx/certs/server.crt \
+          -days 30 \
+          -subj "/CN=wrong-name.example" \
+          >/dev/null 2>&1
+        cat > /etc/nginx/http.d/lab.conf <<'EOF'
+        server {
+          listen 8443 ssl;
+          ssl_certificate     /etc/nginx/certs/server.crt;
+          ssl_certificate_key /etc/nginx/certs/server.key;
+          server_name _;
+          root /var/www/html;
+          index index.html;
+        }
+        EOF
+        echo "<h1>tls</h1>" > /var/www/html/index.html
+        nginx
+
+steps:
+  - id: observe-failure
+    title: See the failure
+    instructions: steps/01-observe-failure.md
+    verify:
+      # User must save curl's exit code (non-zero) to /tmp/curl-exit.
+      # Non-zero means the verification failed as expected.
+      run: test -s /tmp/curl-exit && [ "$(cat /tmp/curl-exit)" != "0" ]
+      failureMessage: Run curl without -k, capture its exit code with `echo $? > /tmp/curl-exit`. It should be non-zero.
+
+  - id: inspect-cert
+    title: Inspect the cert with openssl s_client
+    instructions: steps/02-inspect-cert.md
+    hint: steps/02-hint.md
+    verify:
+      # Must save the cert's CN to /tmp/cn. It should equal wrong-name.example.
+      run: grep -q "wrong-name.example" /tmp/cn 2>/dev/null
+      failureMessage: Extract the certificate's CN with openssl s_client and save it to /tmp/cn.
+
+  - id: identify-cause
+    title: Explain why it fails
+    instructions: steps/03-identify-cause.md
+    verify:
+      run: grep -qi "name\|mismatch\|hostname" /tmp/diagnosis 2>/dev/null
+      failureMessage: Write your diagnosis to /tmp/diagnosis — mention hostname/CN mismatch.
+
+  - id: workarounds
+    title: Workarounds vs proper fixes
+    instructions: steps/04-workarounds.md
+    verify:
+      # User must succeed with the correct hostname via --resolve.
+      run: |
+        curl --resolve wrong-name.example:8443:127.0.0.1 \
+             --cacert /etc/nginx/certs/server.crt \
+             -sf https://wrong-name.example:8443/ | grep -q tls
+      timeout: 15s
+      failureMessage: Use `curl --resolve` to hit the cert's actual name plus `--cacert` for the self-signed CA. Both are required.
+
+finish:
+  markdown: finish.md

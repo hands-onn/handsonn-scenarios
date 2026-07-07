@@ -1,0 +1,87 @@
+apiVersion: labs.handsonn.dev/v1
+kind: Scenario
+id: nginx-debug
+title: Debug a Broken nginx Config
+summary: nginx fails to start. Use nginx -t and the logs to fix it.
+difficulty: intermediate
+tags: [linux, nginx, debugging]
+duration: 20m
+topic: linux
+issueType: shell
+
+session:
+  ttl: 45m
+  quota:
+    cpu: "2"
+    memory: 2Gi
+    pods: 1
+
+environment:
+  type: linux
+  pods:
+    - name: web
+      image: debian:12-slim
+      primary: true
+      command: ["sleep", "infinity"]
+      resources:
+        cpu: "1"
+        memory: 512Mi
+  init:
+    # Install nginx, then break the config in three ways:
+    # 1. Stray unclosed brace (nginx -t catches this).
+    # 2. Root points at a non-existent path (starts but returns 500/404).
+    # 3. Listen 80 (blocked by CAP_NET_BIND_SERVICE drop — start fails).
+    - pod: web
+      run: |
+        set -e
+        apt-get update -q >/dev/null
+        apt-get install -y nginx >/dev/null
+        cat > /etc/nginx/sites-enabled/default <<'EOF'
+        server {
+          listen 80 default_server;
+          server_name _;
+          root /var/www/nope;
+          index index.html;
+          location / {
+            try_files $uri $uri/ =404;
+          }
+        # <-- missing closing brace
+        EOF
+        mkdir -p /var/www/html
+        echo "<h1>fixed</h1>" > /var/www/html/index.html
+
+steps:
+  - id: syntax-check
+    title: Discover the syntax error
+    instructions: steps/01-syntax-check.md
+    verify:
+      # User must fix the missing brace: nginx -t should now pass.
+      run: nginx -t 2>&1 | grep -q "syntax is ok"
+      failureMessage: nginx -t still reports a syntax error. Look at the line/column it points at.
+
+  - id: port-fix
+    title: Fix the port
+    instructions: steps/02-port-fix.md
+    verify:
+      run: grep -qE '^\s*listen\s+8080\s*(default_server\s*)?;' /etc/nginx/sites-enabled/default
+      failureMessage: Change `listen 80` to `listen 8080` (the pod cannot bind to privileged ports).
+
+  - id: root-fix
+    title: Fix the document root
+    instructions: steps/03-root-fix.md
+    hint: steps/03-hint.md
+    verify:
+      run: grep -qE '^\s*root\s+/var/www/html\s*;' /etc/nginx/sites-enabled/default
+      failureMessage: Set `root /var/www/html;` — the /var/www/nope dir does not exist.
+
+  - id: serve
+    title: Start and verify
+    instructions: steps/04-serve.md
+    verify:
+      run: |
+        curl -sf http://127.0.0.1:8080 | grep -q fixed
+      timeout: 10s
+      failureMessage: curl http://127.0.0.1:8080 did not return "fixed". Start nginx and try again.
+
+finish:
+  markdown: finish.md
