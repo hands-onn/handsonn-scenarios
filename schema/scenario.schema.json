@@ -50,20 +50,27 @@
     },
     "environment": {
       "type": "object",
-      "required": ["pods"],
       "additionalProperties": false,
       "properties": {
-        "type": { "enum": ["linux", "kubernetes"], "default": "linux" },
+        "type": {
+          "enum": ["linux", "vcluster"],
+          "default": "linux",
+          "description": "linux: run the declared pods. vcluster: provision a per-session virtual cluster + a kubectl workstation pod; declare no pods, use seed instead."
+        },
         "pods": {
           "type": "array",
-          "minItems": 1,
           "maxItems": 10,
-          "items": { "$ref": "#/$defs/Pod" }
+          "items": { "$ref": "#/$defs/Pod" },
+          "description": "Required for type linux. Must be omitted for type vcluster."
         },
         "init": {
           "type": "array",
           "items": { "$ref": "#/$defs/InitAction" },
           "description": "Run once after all pods are Ready."
+        },
+        "seed": {
+          "type": "string",
+          "description": "Raw YAML applied inside the virtual cluster once ready (type vcluster only). Use to pre-create broken/starter objects."
         }
       }
     },

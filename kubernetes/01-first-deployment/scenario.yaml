@@ -1,0 +1,68 @@
+apiVersion: labs.handsonn.dev/v1
+kind: Scenario
+id: first-deployment
+title: Your First Kubernetes Deployment
+summary: Create a Deployment, scale it, and expose it — inside your own isolated cluster.
+difficulty: beginner
+tags: [kubernetes, workloads, kubectl]
+duration: 25m
+topic: kubernetes
+issueType: workloads
+
+# type: vcluster — the gateway provisions a per-session virtual cluster
+# and a "workstation" pod with kubectl pre-configured against it. You are
+# cluster-admin inside your own throwaway cluster. Declare no pods.
+environment:
+  type: vcluster
+
+session:
+  ttl: 60m
+
+steps:
+  - id: cluster-up
+    title: Confirm your cluster is reachable
+    instructions: steps/01-cluster-up.md
+    verify:
+      run: kubectl get nodes >/dev/null 2>&1 && kubectl get ns >/dev/null 2>&1
+      successMessage: kubectl can reach your cluster.
+      failureMessage: kubectl couldn't reach the cluster. Try `kubectl cluster-info`.
+
+  - id: create-deployment
+    title: Create a Deployment
+    instructions: steps/02-create-deployment.md
+    hint: steps/02-hint.md
+    verify:
+      run: kubectl get deploy web -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null | grep -q nginx
+      failureMessage: No Deployment named "web" running nginx. Create it with kubectl create deployment.
+
+  - id: scale
+    title: Scale to 3 replicas
+    instructions: steps/03-scale.md
+    verify:
+      run: |
+        want=3
+        have=$(kubectl get deploy web -o jsonpath='{.spec.replicas}' 2>/dev/null)
+        [ "$have" = "$want" ]
+      failureMessage: Deployment "web" must have spec.replicas=3. Use kubectl scale.
+
+  - id: expose
+    title: Expose it with a Service
+    instructions: steps/04-expose.md
+    hint: steps/04-hint.md
+    verify:
+      run: |
+        kubectl get svc web -o jsonpath='{.spec.selector.app}' 2>/dev/null | grep -q web \
+          && kubectl get svc web -o jsonpath='{.spec.ports[0].port}' 2>/dev/null | grep -q 80
+      failureMessage: Create a Service named "web" targeting the deployment on port 80 (kubectl expose deployment web --port=80).
+
+  - id: rollout-status
+    title: Watch the rollout finish
+    instructions: steps/05-rollout-status.md
+    verify:
+      run: |
+        ready=$(kubectl get deploy web -o jsonpath='{.status.readyReplicas}' 2>/dev/null)
+        [ "$ready" = "3" ]
+      failureMessage: All 3 replicas should be ready. Check `kubectl rollout status deployment/web`.
+
+finish:
+  markdown: finish.md
