@@ -1,0 +1,79 @@
+apiVersion: labs.handsonn.dev/v1
+kind: Scenario
+id: probes-and-limits
+title: Health Probes and Resource Limits
+summary: Add readiness/liveness probes and resource requests/limits, and see how they change scheduling and traffic.
+difficulty: intermediate
+tags: [kubernetes, health, probes, resources]
+duration: 30m
+topic: kubernetes
+issueType: health
+
+environment:
+  type: vcluster
+  # A bare Deployment with no probes and no resources — the starting
+  # point most people ship and later regret.
+  seed: |
+    apiVersion: apps/v1
+    kind: Deployment
+    metadata:
+      name: web
+      labels: { app: web }
+    spec:
+      replicas: 2
+      selector:
+        matchLabels: { app: web }
+      template:
+        metadata:
+          labels: { app: web }
+        spec:
+          containers:
+            - name: web
+              image: nginx:1.27
+              ports:
+                - containerPort: 80
+
+session:
+  ttl: 60m
+
+steps:
+  - id: baseline
+    title: Observe the naked Deployment
+    instructions: steps/01-baseline.md
+    verify:
+      run: test -f /tmp/baseline
+      failureMessage: Inspect the pod (no probes, no limits), then `touch /tmp/baseline`.
+
+  - id: readiness
+    title: Add a readiness probe
+    instructions: steps/02-readiness.md
+    hint: steps/02-hint.md
+    verify:
+      run: |
+        kubectl get deploy web -o jsonpath='{.spec.template.spec.containers[0].readinessProbe.httpGet.path}' 2>/dev/null | grep -q / \
+          && [ "$(kubectl get deploy web -o jsonpath='{.status.readyReplicas}')" = "2" ]
+      timeout: 40s
+      failureMessage: Add an httpGet readiness probe to the web container and keep 2 replicas ready.
+
+  - id: liveness
+    title: Add a liveness probe
+    instructions: steps/03-liveness.md
+    verify:
+      run: |
+        kubectl get deploy web -o jsonpath='{.spec.template.spec.containers[0].livenessProbe.httpGet.port}' 2>/dev/null | grep -q 80
+      failureMessage: Add an httpGet liveness probe on port 80 to the web container.
+
+  - id: resources
+    title: Set requests and limits
+    instructions: steps/04-resources.md
+    hint: steps/04-hint.md
+    verify:
+      run: |
+        req=$(kubectl get deploy web -o jsonpath='{.spec.template.spec.containers[0].resources.requests.memory}' 2>/dev/null)
+        lim=$(kubectl get deploy web -o jsonpath='{.spec.template.spec.containers[0].resources.limits.memory}' 2>/dev/null)
+        [ -n "$req" ] && [ -n "$lim" ] && [ "$(kubectl get deploy web -o jsonpath='{.status.readyReplicas}')" = "2" ]
+      timeout: 40s
+      failureMessage: Set both memory requests and limits on the web container, keeping 2 replicas ready.
+
+finish:
+  markdown: finish.md

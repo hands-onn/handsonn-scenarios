@@ -1,0 +1,71 @@
+apiVersion: labs.handsonn.dev/v1
+kind: Scenario
+id: crashloop-detective
+title: Debug a CrashLoopBackOff
+summary: A Deployment keeps restarting. Find out why with logs and describe, then fix it.
+difficulty: intermediate
+tags: [kubernetes, debugging, crashloop]
+duration: 25m
+topic: kubernetes
+issueType: debugging
+
+environment:
+  type: vcluster
+  # A deployment whose container exits immediately (bad command) →
+  # CrashLoopBackOff. The fix is to correct the command.
+  seed: |
+    apiVersion: apps/v1
+    kind: Deployment
+    metadata:
+      name: api
+      labels: { app: api }
+    spec:
+      replicas: 1
+      selector:
+        matchLabels: { app: api }
+      template:
+        metadata:
+          labels: { app: api }
+        spec:
+          containers:
+            - name: api
+              image: busybox:1.36
+              # BUG: exits 1 immediately → CrashLoopBackOff.
+              command: ["sh", "-c", "echo starting && exit 1"]
+
+session:
+  ttl: 60m
+
+steps:
+  - id: spot
+    title: Spot the crashloop
+    instructions: steps/01-spot.md
+    verify:
+      run: |
+        # The api pod should be in CrashLoopBackOff / not ready. Confirm the
+        # user recorded the pod name.
+        test -s /tmp/podname && kubectl get pod "$(cat /tmp/podname)" >/dev/null 2>&1
+      failureMessage: Find the crashlooping pod and save its name to /tmp/podname.
+
+  - id: logs
+    title: Read the logs
+    instructions: steps/02-logs.md
+    hint: steps/02-hint.md
+    verify:
+      run: grep -qi "exit\|starting\|command\|crash" /tmp/rootcause 2>/dev/null
+      failureMessage: Look at the pod's logs + describe, then write what's wrong to /tmp/rootcause.
+
+  - id: fix
+    title: Fix the container command
+    instructions: steps/03-fix.md
+    hint: steps/03-hint.md
+    verify:
+      run: |
+        # After fix, the api deployment should have a ready replica and the
+        # container should no longer exit immediately.
+        [ "$(kubectl get deploy api -o jsonpath='{.status.readyReplicas}' 2>/dev/null)" = "1" ]
+      timeout: 30s
+      failureMessage: The api Deployment must have 1 ready replica. Change the command so the container keeps running.
+
+finish:
+  markdown: finish.md

@@ -1,0 +1,1 @@
+`Pending` + `FailedScheduling` = the scheduler can't place the pod. Here the nodeSelector matches no node. Remove it (patch above) or label a node to match. The check wants `picky` at 1 ready replica.

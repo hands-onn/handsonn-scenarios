@@ -1,0 +1,61 @@
+apiVersion: labs.handsonn.dev/v1
+kind: Scenario
+id: configmaps-and-services
+title: ConfigMaps, Services, and DNS
+summary: Inject config from a ConfigMap, front pods with a Service, and resolve it by DNS.
+difficulty: intermediate
+tags: [kubernetes, config, networking, dns]
+duration: 30m
+topic: kubernetes
+issueType: config
+
+environment:
+  type: vcluster
+
+session:
+  ttl: 60m
+
+steps:
+  - id: configmap
+    title: Create a ConfigMap
+    instructions: steps/01-configmap.md
+    hint: steps/01-hint.md
+    verify:
+      run: |
+        kubectl get configmap app-config -o jsonpath='{.data.GREETING}' 2>/dev/null | grep -q .
+      failureMessage: Create a ConfigMap named app-config with a key GREETING.
+
+  - id: consume
+    title: Inject the ConfigMap into a Deployment
+    instructions: steps/02-consume.md
+    hint: steps/02-hint.md
+    verify:
+      run: |
+        # The web deployment must reference app-config via envFrom or env.
+        kubectl get deploy web -o yaml 2>/dev/null | grep -q "app-config" \
+          && [ "$(kubectl get deploy web -o jsonpath='{.status.readyReplicas}')" = "2" ]
+      timeout: 30s
+      failureMessage: Create a Deployment "web" (2 replicas, nginx) that pulls env from the app-config ConfigMap.
+
+  - id: service
+    title: Front it with a Service
+    instructions: steps/03-service.md
+    verify:
+      run: |
+        kubectl get svc web -o jsonpath='{.spec.ports[0].port}' 2>/dev/null | grep -q 80 \
+          && kubectl get endpoints web -o jsonpath='{.subsets[0].addresses[0].ip}' 2>/dev/null | grep -q .
+      failureMessage: Expose web on port 80 with a Service that has at least one endpoint.
+
+  - id: dns
+    title: Resolve the Service by DNS
+    instructions: steps/04-dns.md
+    hint: steps/04-hint.md
+    verify:
+      run: |
+        # A short-lived client pod curls the service by DNS name. Success
+        # is recorded by the user to /tmp/dns-ok.
+        grep -q ok /tmp/dns-ok 2>/dev/null
+      failureMessage: From a test pod, curl http://web (or web.default.svc) and save proof to /tmp/dns-ok.
+
+finish:
+  markdown: finish.md

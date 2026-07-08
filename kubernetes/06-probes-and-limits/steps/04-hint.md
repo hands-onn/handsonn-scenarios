@@ -1,0 +1,1 @@
+The check needs both `resources.requests.memory` and `resources.limits.memory` set, and 2 ready replicas. The patch above sets cpu+memory for both. A spec change rolls out new pods — wait for readiness.

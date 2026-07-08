@@ -1,0 +1,85 @@
+apiVersion: labs.handsonn.dev/v1
+kind: Scenario
+id: imagepull-and-pending
+title: ImagePullBackOff and Unschedulable Pods
+summary: Two Deployments won't start — one can't pull its image, one can't be scheduled. Fix both.
+difficulty: intermediate
+tags: [kubernetes, debugging, scheduling]
+duration: 30m
+topic: kubernetes
+issueType: debugging
+
+environment:
+  type: vcluster
+  seed: |
+    apiVersion: apps/v1
+    kind: Deployment
+    metadata:
+      name: puller
+      labels: { app: puller }
+    spec:
+      replicas: 1
+      selector:
+        matchLabels: { app: puller }
+      template:
+        metadata:
+          labels: { app: puller }
+        spec:
+          containers:
+            - name: app
+              # BUG: typo'd tag → ImagePullBackOff
+              image: nginx:1.25-typo-nonexistent
+    ---
+    apiVersion: apps/v1
+    kind: Deployment
+    metadata:
+      name: picky
+      labels: { app: picky }
+    spec:
+      replicas: 1
+      selector:
+        matchLabels: { app: picky }
+      template:
+        metadata:
+          labels: { app: picky }
+        spec:
+          # BUG: nodeSelector no node satisfies → Pending (Unschedulable)
+          nodeSelector:
+            disktype: nonexistent-ssd
+          containers:
+            - name: app
+              image: nginx:1.27
+
+session:
+  ttl: 60m
+
+steps:
+  - id: triage
+    title: Triage both failing Deployments
+    instructions: steps/01-triage.md
+    verify:
+      run: test -f /tmp/triaged
+      failureMessage: Look at both pods (get pods, describe), then `touch /tmp/triaged`.
+
+  - id: fix-pull
+    title: Fix the image pull failure
+    instructions: steps/02-fix-pull.md
+    hint: steps/02-hint.md
+    verify:
+      run: |
+        [ "$(kubectl get deploy puller -o jsonpath='{.status.readyReplicas}' 2>/dev/null)" = "1" ]
+      timeout: 30s
+      failureMessage: puller must have 1 ready replica — correct its image to a real tag (e.g. nginx:1.27).
+
+  - id: fix-schedule
+    title: Fix the unschedulable pod
+    instructions: steps/03-fix-schedule.md
+    hint: steps/03-hint.md
+    verify:
+      run: |
+        [ "$(kubectl get deploy picky -o jsonpath='{.status.readyReplicas}' 2>/dev/null)" = "1" ]
+      timeout: 30s
+      failureMessage: picky must have 1 ready replica — remove or satisfy the impossible nodeSelector.
+
+finish:
+  markdown: finish.md

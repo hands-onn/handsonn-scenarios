@@ -1,0 +1,86 @@
+apiVersion: labs.handsonn.dev/v1
+kind: Scenario
+id: rollout-and-rollback
+title: Rollouts and Rollbacks
+summary: Ship a new image, break it on purpose, then roll back to the last good revision.
+difficulty: intermediate
+tags: [kubernetes, workloads, rollout]
+duration: 25m
+topic: kubernetes
+issueType: workloads
+
+environment:
+  type: vcluster
+  # Start with a healthy Deployment already running so the lab is about
+  # rollouts, not initial creation.
+  seed: |
+    apiVersion: apps/v1
+    kind: Deployment
+    metadata:
+      name: web
+      labels: { app: web }
+    spec:
+      replicas: 3
+      selector:
+        matchLabels: { app: web }
+      template:
+        metadata:
+          labels: { app: web }
+        spec:
+          containers:
+            - name: web
+              image: nginx:1.25
+              ports:
+                - containerPort: 80
+
+session:
+  ttl: 60m
+
+steps:
+  - id: observe
+    title: Observe the running Deployment
+    instructions: steps/01-observe.md
+    verify:
+      run: kubectl get deploy web -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null | grep -q 'nginx:1.25'
+      failureMessage: Expected the seeded Deployment "web" running nginx:1.25.
+
+  - id: good-update
+    title: Roll out a new version
+    instructions: steps/02-good-update.md
+    hint: steps/02-hint.md
+    verify:
+      run: |
+        kubectl get deploy web -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null | grep -q 'nginx:1.27' \
+          && [ "$(kubectl get deploy web -o jsonpath='{.status.readyReplicas}')" = "3" ]
+      failureMessage: Update web to nginx:1.27 and let all 3 replicas become ready.
+
+  - id: bad-update
+    title: Ship a broken image
+    instructions: steps/03-bad-update.md
+    verify:
+      run: |
+        # A bad image leaves the new ReplicaSet unable to progress. We
+        # detect that the user pushed the broken tag AND at least one pod
+        # is now not-running (ImagePull/ErrImage).
+        kubectl get deploy web -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null | grep -q 'nginx:does-not-exist'
+      failureMessage: Set the image to nginx:does-not-exist to simulate a bad deploy.
+
+  - id: diagnose
+    title: See the rollout stuck
+    instructions: steps/04-diagnose.md
+    verify:
+      run: test -f /tmp/diagnosed
+      failureMessage: Inspect the stuck rollout (kubectl rollout status / get pods), then `touch /tmp/diagnosed`.
+
+  - id: rollback
+    title: Roll back to the last good revision
+    instructions: steps/05-rollback.md
+    hint: steps/05-hint.md
+    verify:
+      run: |
+        img=$(kubectl get deploy web -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null)
+        echo "$img" | grep -q 'nginx:1.27' && [ "$(kubectl get deploy web -o jsonpath='{.status.readyReplicas}')" = "3" ]
+      failureMessage: Roll back so web is running nginx:1.27 again with all 3 replicas ready.
+
+finish:
+  markdown: finish.md

@@ -1,0 +1,1 @@
+The check wants `kubectl get deploy api` to show 1 ready replica. Replace the container command with something that stays alive, e.g. `["sh","-c","echo starting && sleep infinity"]`. A new pod rolls out automatically on the spec change.

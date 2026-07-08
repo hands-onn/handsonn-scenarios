@@ -1,0 +1,1 @@
+`kubectl run tester --image=nicolaka/netshoot:latest --restart=Never -i --rm -- curl -s http://web` should return HTML. Then `echo ok > /tmp/dns-ok`. If DNS fails, check the Service has endpoints (previous step).
