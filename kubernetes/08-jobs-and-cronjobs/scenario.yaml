@@ -1,0 +1,59 @@
+apiVersion: labs.handsonn.dev/v1
+kind: Scenario
+id: jobs-and-cronjobs
+title: Jobs and CronJobs
+summary: Run a batch workload to completion with a Job, then schedule it repeatedly with a CronJob.
+difficulty: intermediate
+tags: [kubernetes, workloads, batch]
+duration: 30m
+topic: kubernetes
+issueType: workloads
+
+environment:
+  type: vcluster
+
+session:
+  ttl: 60m
+
+steps:
+  - id: run-job
+    title: Run a one-shot Job
+    instructions: steps/01-run-job.md
+    hint: steps/01-hint.md
+    verify:
+      run: |
+        # Job 'hello' should reach 1 successful completion.
+        [ "$(kubectl get job hello -o jsonpath='{.status.succeeded}' 2>/dev/null)" = "1" ]
+      timeout: 60s
+      failureMessage: Create a Job named "hello" that runs to completion (succeeded=1).
+
+  - id: inspect-job
+    title: Inspect the Job's pod and output
+    instructions: steps/02-inspect-job.md
+    verify:
+      run: test -f /tmp/job_output
+      failureMessage: Read the completed Job pod's logs, then `touch /tmp/job_output`.
+
+  - id: parallel-job
+    title: Run a Job with completions
+    instructions: steps/03-parallel-job.md
+    hint: steps/03-hint.md
+    verify:
+      run: |
+        # batch job with completions=3
+        [ "$(kubectl get job batch -o jsonpath='{.spec.completions}' 2>/dev/null)" = "3" ] \
+          && [ "$(kubectl get job batch -o jsonpath='{.status.succeeded}' 2>/dev/null)" = "3" ]
+      timeout: 90s
+      failureMessage: Create a Job "batch" with completions=3 and let all 3 succeed.
+
+  - id: cronjob
+    title: Schedule with a CronJob
+    instructions: steps/04-cronjob.md
+    hint: steps/04-hint.md
+    verify:
+      run: |
+        kubectl get cronjob heartbeat -o jsonpath='{.spec.schedule}' 2>/dev/null | grep -q '.'
+      failureMessage: Create a CronJob named "heartbeat" with a schedule (e.g. every minute).
+
+finish:
+  markdown: finish.md

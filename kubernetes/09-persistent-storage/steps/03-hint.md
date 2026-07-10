@@ -1,0 +1,1 @@
+Pair `volumes: [{name: vol, persistentVolumeClaim: {claimName: data}}]` with a container `volumeMounts: [{name: vol, mountPath: /data}]`. Write to /data/message. The check confirms the pod references PVC `data` and the file is non-empty.

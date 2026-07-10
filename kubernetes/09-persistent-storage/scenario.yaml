@@ -1,0 +1,63 @@
+apiVersion: labs.handsonn.dev/v1
+kind: Scenario
+id: persistent-storage
+title: Persistent Storage with PVCs
+summary: Claim storage with a PVC, mount it, write data, and prove it survives a pod restart.
+difficulty: intermediate
+tags: [kubernetes, storage, pvc]
+duration: 30m
+topic: kubernetes
+issueType: config
+
+environment:
+  type: vcluster
+
+session:
+  ttl: 60m
+
+steps:
+  - id: storageclass
+    title: See the available storage
+    instructions: steps/01-storageclass.md
+    verify:
+      run: |
+        # There should be at least one StorageClass in the cluster.
+        kubectl get storageclass -o name 2>/dev/null | grep -q storageclass
+      failureMessage: List StorageClasses (`kubectl get storageclass`). There should be a default one.
+
+  - id: create-pvc
+    title: Create a PersistentVolumeClaim
+    instructions: steps/02-create-pvc.md
+    hint: steps/02-hint.md
+    verify:
+      run: |
+        # PVC 'data' exists (Bound or Pending — local-path binds on first use).
+        kubectl get pvc data -o jsonpath='{.spec.resources.requests.storage}' 2>/dev/null | grep -q .
+      timeout: 20s
+      failureMessage: Create a PVC named "data" requesting storage (e.g. 100Mi).
+
+  - id: write-data
+    title: Mount it and write data
+    instructions: steps/03-write-data.md
+    hint: steps/03-hint.md
+    verify:
+      run: |
+        # A pod 'writer' mounts the PVC and writes /data/message.
+        kubectl get pod writer -o jsonpath='{.spec.volumes[*].persistentVolumeClaim.claimName}' 2>/dev/null | grep -q data \
+          && kubectl exec writer -- cat /data/message 2>/dev/null | grep -q .
+      timeout: 60s
+      failureMessage: Create a pod "writer" that mounts PVC data at /data and writes /data/message.
+
+  - id: persistence
+    title: Prove the data persists
+    instructions: steps/04-persistence.md
+    hint: steps/04-hint.md
+    verify:
+      run: |
+        # After deleting+recreating a consumer pod, the data is still there.
+        kubectl exec reader -- cat /data/message 2>/dev/null | grep -q .
+      timeout: 60s
+      failureMessage: Delete writer, create a "reader" pod mounting the same PVC, and confirm /data/message still exists.
+
+finish:
+  markdown: finish.md

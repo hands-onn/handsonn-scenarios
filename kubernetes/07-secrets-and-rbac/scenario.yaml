@@ -1,0 +1,62 @@
+apiVersion: labs.handsonn.dev/v1
+kind: Scenario
+id: secrets-and-rbac
+title: Secrets and RBAC
+summary: Create a Secret, mount it into a pod, then lock down access with a Role and RoleBinding.
+difficulty: intermediate
+tags: [kubernetes, config, security, rbac]
+duration: 30m
+topic: kubernetes
+issueType: config
+
+environment:
+  type: vcluster
+
+session:
+  ttl: 60m
+
+steps:
+  - id: create-secret
+    title: Create a Secret
+    instructions: steps/01-create-secret.md
+    hint: steps/01-hint.md
+    verify:
+      run: |
+        kubectl get secret app-secret -o jsonpath='{.data.API_KEY}' 2>/dev/null | grep -q .
+      failureMessage: Create a Secret named app-secret with a key API_KEY.
+
+  - id: mount-secret
+    title: Mount the Secret into a pod
+    instructions: steps/02-mount-secret.md
+    hint: steps/02-hint.md
+    verify:
+      run: |
+        # The reader deployment must reference app-secret and be ready.
+        kubectl get deploy reader -o yaml 2>/dev/null | grep -q 'app-secret' \
+          && [ "$(kubectl get deploy reader -o jsonpath='{.status.readyReplicas}')" = "1" ]
+      timeout: 30s
+      failureMessage: Create a Deployment "reader" that consumes API_KEY from app-secret (env or volume) and becomes ready.
+
+  - id: create-role
+    title: Create a Role that can read Secrets
+    instructions: steps/03-create-role.md
+    hint: steps/03-hint.md
+    verify:
+      run: |
+        kubectl get role secret-reader -o jsonpath='{.rules[0].resources[0]}' 2>/dev/null | grep -q secrets
+      failureMessage: Create a Role named secret-reader granting get/list on secrets.
+
+  - id: bind-role
+    title: Bind the Role to a ServiceAccount
+    instructions: steps/04-bind-role.md
+    verify:
+      run: |
+        # A ServiceAccount 'appsa' bound to secret-reader via RoleBinding,
+        # verified with kubectl auth can-i --as.
+        kubectl get rolebinding read-secrets >/dev/null 2>&1 \
+          && kubectl auth can-i get secrets --as=system:serviceaccount:default:appsa 2>/dev/null | grep -q yes
+      timeout: 20s
+      failureMessage: Create ServiceAccount appsa and a RoleBinding read-secrets granting it the secret-reader Role. `kubectl auth can-i get secrets --as=system:serviceaccount:default:appsa` should say yes.
+
+finish:
+  markdown: finish.md
