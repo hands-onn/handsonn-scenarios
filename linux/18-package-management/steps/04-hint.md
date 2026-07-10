@@ -1,0 +1,1 @@
+`apk fetch figlet` into /tmp/pkgs downloads the .apk; then `apk add --allow-untrusted /tmp/pkgs/figlet-*.apk` installs from the file. The check needs both a figlet-*.apk on disk and a working `figlet` command.

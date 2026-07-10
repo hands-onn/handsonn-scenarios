@@ -1,0 +1,85 @@
+apiVersion: labs.handsonn.dev/v1
+kind: Scenario
+id: text-processing
+title: Text Processing — grep, awk, sed
+summary: Slice and summarize an access log with grep, cut, sort, uniq, awk, and sed.
+difficulty: intermediate
+tags: [linux, shell, text, logs]
+duration: 25m
+topic: linux
+issueType: shell
+
+session:
+  ttl: 30m
+  quota:
+    cpu: "2"
+    memory: 2Gi
+    pods: 1
+
+environment:
+  type: linux
+  pods:
+    - name: shell
+      image: nicolaka/netshoot:latest
+      primary: true
+      command: ["sleep", "infinity"]
+      resources:
+        cpu: "500m"
+        memory: 512Mi
+  init:
+    # Seed a small nginx-style access log with predictable contents so
+    # answers are deterministic.
+    - pod: shell
+      run: |
+        mkdir -p /data
+        cat > /data/access.log <<'LOG'
+        10.0.0.1 - - [10/Jul/2026:10:00:01] "GET /index.html" 200 512
+        10.0.0.2 - - [10/Jul/2026:10:00:02] "GET /about.html" 200 256
+        10.0.0.1 - - [10/Jul/2026:10:00:03] "GET /missing" 404 0
+        10.0.0.3 - - [10/Jul/2026:10:00:04] "POST /api/login" 500 128
+        10.0.0.1 - - [10/Jul/2026:10:00:05] "GET /index.html" 200 512
+        10.0.0.2 - - [10/Jul/2026:10:00:06] "GET /missing" 404 0
+        10.0.0.3 - - [10/Jul/2026:10:00:07] "GET /index.html" 200 512
+        10.0.0.1 - - [10/Jul/2026:10:00:08] "GET /api/data" 500 64
+        10.0.0.4 - - [10/Jul/2026:10:00:09] "GET /index.html" 200 512
+        10.0.0.2 - - [10/Jul/2026:10:00:10] "GET /about.html" 200 256
+        LOG
+
+steps:
+  - id: grep-count
+    title: Count matching lines with grep
+    instructions: steps/01-grep-count.md
+    hint: steps/01-hint.md
+    verify:
+      # Lines with a 500 status = 2.
+      run: grep -q '^2$' /tmp/errors 2>/dev/null
+      failureMessage: Count the HTTP 500 lines in /data/access.log and write the number to /tmp/errors. Expected 2.
+
+  - id: cut-sort-uniq
+    title: Top talker with cut | sort | uniq
+    instructions: steps/02-cut-sort-uniq.md
+    hint: steps/02-hint.md
+    verify:
+      # Busiest client IP = 10.0.0.1 (4 requests).
+      run: grep -q '^10\.0\.0\.1$' /tmp/top_ip 2>/dev/null
+      failureMessage: Find the IP with the most requests (field 1) and write it to /tmp/top_ip. Expected 10.0.0.1.
+
+  - id: awk-sum
+    title: Sum a column with awk
+    instructions: steps/03-awk-sum.md
+    hint: steps/03-hint.md
+    verify:
+      # Total bytes (last field) summed = 512*4+256*2+128+64 = 2048+512+192 = 2752.
+      run: grep -q '^2752$' /tmp/total_bytes 2>/dev/null
+      failureMessage: Sum the last field (bytes) across all lines with awk; write the total to /tmp/total_bytes. Expected 2752.
+
+  - id: sed-rewrite
+    title: Rewrite text with sed
+    instructions: steps/04-sed-rewrite.md
+    verify:
+      # After sed replacing the date, no original date string remains.
+      run: test -f /data/access.redacted.log && ! grep -q '10/Jul/2026' /data/access.redacted.log
+      failureMessage: Use sed to replace every '10/Jul/2026' with 'REDACTED' into /data/access.redacted.log.
+
+finish:
+  markdown: finish.md

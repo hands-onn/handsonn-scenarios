@@ -1,0 +1,72 @@
+apiVersion: labs.handsonn.dev/v1
+kind: Scenario
+id: disk-and-mounts
+title: Disk Usage and Filesystems
+summary: Find what's eating disk with df and du, locate big files, and read /proc/mounts.
+difficulty: beginner
+tags: [linux, shell, disk, storage]
+duration: 20m
+topic: linux
+issueType: shell
+
+session:
+  ttl: 30m
+  quota:
+    cpu: "2"
+    memory: 2Gi
+    pods: 1
+
+environment:
+  type: linux
+  pods:
+    - name: shell
+      image: nicolaka/netshoot:latest
+      primary: true
+      command: ["sleep", "infinity"]
+      resources:
+        cpu: "500m"
+        memory: 512Mi
+  init:
+    # Plant a tree with one obviously-large file to hunt down.
+    - pod: shell
+      run: |
+        mkdir -p /data/logs /data/cache /data/tmp
+        dd if=/dev/zero of=/data/cache/big.bin bs=1M count=20 >/dev/null 2>&1
+        echo small > /data/logs/app.log
+        head -c 4096 /dev/zero > /data/tmp/scratch
+
+steps:
+  - id: df
+    title: Check free space with df
+    instructions: steps/01-df.md
+    verify:
+      run: test -f /tmp/df_seen
+      failureMessage: Run `df -h`, look at the filesystems, then `touch /tmp/df_seen`.
+
+  - id: du
+    title: Find the biggest directory with du
+    instructions: steps/02-du.md
+    hint: steps/02-hint.md
+    verify:
+      # Biggest dir under /data is cache (the 20M file).
+      run: grep -q 'cache' /tmp/big_dir 2>/dev/null
+      failureMessage: Find the largest subdirectory of /data with du and write its name (containing 'cache') to /tmp/big_dir.
+
+  - id: find-big
+    title: Locate large files with find
+    instructions: steps/03-find-big.md
+    hint: steps/03-hint.md
+    verify:
+      # find for files >10M under /data → the big.bin path.
+      run: grep -q 'big.bin' /tmp/big_file 2>/dev/null
+      failureMessage: Use find to locate files larger than 10M under /data; write the path (big.bin) to /tmp/big_file.
+
+  - id: mounts
+    title: Inspect mounts
+    instructions: steps/04-mounts.md
+    verify:
+      run: test -s /tmp/rootfs_type
+      failureMessage: Identify the filesystem type of / from /proc/mounts (or `mount`) and write it to /tmp/rootfs_type.
+
+finish:
+  markdown: finish.md

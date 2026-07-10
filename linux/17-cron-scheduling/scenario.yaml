@@ -1,0 +1,70 @@
+apiVersion: labs.handsonn.dev/v1
+kind: Scenario
+id: cron-scheduling
+title: Scheduling Jobs with cron
+summary: Write a crontab entry, start crond, and confirm a scheduled job actually runs.
+difficulty: intermediate
+tags: [linux, shell, cron, scheduling]
+duration: 20m
+topic: linux
+issueType: shell
+
+session:
+  ttl: 30m
+  quota:
+    cpu: "2"
+    memory: 2Gi
+    pods: 1
+
+environment:
+  type: linux
+  pods:
+    - name: shell
+      image: nicolaka/netshoot:latest
+      primary: true
+      command: ["sleep", "infinity"]
+      resources:
+        cpu: "500m"
+        memory: 512Mi
+  # No init — the learner sets everything up.
+
+steps:
+  - id: understand-fields
+    title: Understand the cron format
+    instructions: steps/01-understand-fields.md
+    hint: steps/01-hint.md
+    verify:
+      # Learner decodes a schedule and writes the answer.
+      run: grep -qiE 'every.*(minute|min)' /tmp/cron_meaning 2>/dev/null
+      failureMessage: "Read the cron format section and write what '* * * * *' means to /tmp/cron_meaning (hint - every minute)."
+
+  - id: write-crontab
+    title: Write a crontab entry
+    instructions: steps/02-write-crontab.md
+    hint: steps/02-hint.md
+    verify:
+      # A crontab exists containing a per-minute job writing to /tmp/heartbeat.
+      run: |
+        (crontab -l 2>/dev/null; cat /var/spool/cron/crontabs/root 2>/dev/null) \
+          | grep -q 'heartbeat'
+      failureMessage: Add a cron entry (every minute) that appends to /tmp/heartbeat. Install it with `crontab`.
+
+  - id: start-crond
+    title: Start the cron daemon
+    instructions: steps/03-start-crond.md
+    hint: steps/03-hint.md
+    verify:
+      run: pgrep crond >/dev/null 2>&1
+      failureMessage: Start the cron daemon (`crond`). `pgrep crond` should find it.
+
+  - id: observe-run
+    title: Confirm the job fired
+    instructions: steps/04-observe-run.md
+    verify:
+      # After up to ~70s the heartbeat file should have at least one line.
+      run: test -s /tmp/heartbeat
+      timeout: 90s
+      failureMessage: Wait for the top of the next minute — /tmp/heartbeat should get a line once cron runs the job.
+
+finish:
+  markdown: finish.md

@@ -1,0 +1,69 @@
+apiVersion: labs.handsonn.dev/v1
+kind: Scenario
+id: package-management
+title: Package Management
+summary: Search, install, inspect, and remove packages — from the repo and from a local package file.
+difficulty: beginner
+tags: [linux, shell, packages, apk]
+duration: 25m
+topic: linux
+issueType: shell
+
+session:
+  ttl: 30m
+  quota:
+    cpu: "2"
+    memory: 2Gi
+    pods: 1
+
+environment:
+  type: linux
+  pods:
+    - name: shell
+      image: nicolaka/netshoot:latest
+      primary: true
+      command: ["sleep", "infinity"]
+      resources:
+        cpu: "500m"
+        memory: 512Mi
+
+steps:
+  - id: search
+    title: Find a package
+    instructions: steps/01-search.md
+    hint: steps/01-hint.md
+    verify:
+      # Learner records the package that provides the `tree` command.
+      run: grep -qi 'tree' /tmp/pkg_name 2>/dev/null
+      failureMessage: Search the package index for the tool 'tree' and write the package name to /tmp/pkg_name.
+
+  - id: install
+    title: Install from the repository
+    instructions: steps/02-install.md
+    hint: steps/02-hint.md
+    verify:
+      run: command -v tree >/dev/null 2>&1
+      failureMessage: Install the 'tree' package so the `tree` command works.
+
+  - id: inspect
+    title: Inspect what a package installed
+    instructions: steps/03-inspect.md
+    verify:
+      # Learner lists files owned by the package and records the binary path.
+      run: grep -q '/usr/bin/tree' /tmp/pkg_files 2>/dev/null
+      failureMessage: List the files the 'tree' package installed and write the binary path (/usr/bin/tree) to /tmp/pkg_files.
+
+  - id: local-file
+    title: Install from a local package file
+    instructions: steps/04-local-file.md
+    hint: steps/04-hint.md
+    verify:
+      # Learner fetches figlet's .apk to disk and installs it from the
+      # file (not the repo). Verify a .apk exists on disk AND figlet works.
+      run: |
+        ls /tmp/pkgs/figlet-*.apk >/dev/null 2>&1 && command -v figlet >/dev/null 2>&1
+      timeout: 30s
+      failureMessage: Fetch the figlet .apk into /tmp/pkgs, then install it from the file with `apk add --allow-untrusted`. figlet should then work.
+
+finish:
+  markdown: finish.md
