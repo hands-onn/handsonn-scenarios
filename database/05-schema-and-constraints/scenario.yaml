@@ -1,0 +1,93 @@
+apiVersion: labs.handsonn.dev/v1
+kind: Scenario
+id: schema-and-constraints
+title: Schema Design and Constraints
+summary: Build a table whose constraints reject bad data — NOT NULL, UNIQUE, CHECK, foreign keys.
+difficulty: intermediate
+tags: [database, sql, postgres, schema]
+duration: 30m
+topic: database
+issueType: schema
+
+session:
+  ttl: 45m
+  quota:
+    cpu: "2"
+    memory: 2Gi
+    pods: 2
+
+environment:
+  type: linux
+  pods:
+    - name: shell
+      image: nicolaka/netshoot:latest
+      primary: true
+      command: ["sleep", "infinity"]
+      resources:
+        cpu: "500m"
+        memory: 512Mi
+    - name: db
+      image: postgres:15-alpine
+      expose: [5432]
+      addCapabilities: [SETUID, SETGID, CHOWN]
+      env:
+        - name: POSTGRES_PASSWORD
+          value: lab
+        - name: POSTGRES_DB
+          value: shop
+      resources:
+        cpu: "500m"
+        memory: 512Mi
+
+  init:
+    - pod: shell
+      run: |
+        set -e
+        apk add --no-cache postgresql-client >/dev/null 2>&1
+        for i in $(seq 1 30); do
+          PGPASSWORD=lab psql -h db -U postgres -d shop -c 'SELECT 1' >/dev/null 2>&1 && break
+          sleep 2
+        done
+
+steps:
+  - id: create-table
+    title: Create a constrained table
+    instructions: steps/01-create-table.md
+    hint: steps/01-hint.md
+    verify:
+      # Table accounts must exist with a UNIQUE email, NOT NULL, CHECK on balance.
+      run: |
+        PGPASSWORD=lab psql -h db -U postgres -d shop -tAc "
+          SELECT count(*) FROM information_schema.table_constraints
+          WHERE table_name='accounts'
+            AND constraint_type IN ('UNIQUE','CHECK','PRIMARY KEY')
+        " 2>/dev/null | awk '{s+=$1} END{print s}' | grep -qvE '^0$|^$'
+      timeout: 15s
+      failureMessage: Create table "accounts" with a PRIMARY KEY, a UNIQUE email, and a CHECK constraint (see instructions).
+
+  - id: reject-bad
+    title: Prove the constraints reject bad data
+    instructions: steps/02-reject-bad.md
+    hint: steps/02-hint.md
+    verify:
+      # After a valid insert + two rejected inserts, exactly one row remains.
+      run: |
+        PGPASSWORD=lab psql -h db -U postgres -d shop -tAc \
+          "SELECT count(*) FROM accounts" 2>/dev/null | grep -q '^1$'
+      timeout: 15s
+      failureMessage: Insert one valid row; attempt a duplicate-email and a negative-balance insert (both must be rejected). Exactly 1 row should remain.
+
+  - id: foreign-key
+    title: Add a related table with a foreign key
+    instructions: steps/03-foreign-key.md
+    verify:
+      run: |
+        PGPASSWORD=lab psql -h db -U postgres -d shop -tAc "
+          SELECT count(*) FROM information_schema.table_constraints
+          WHERE table_name='transactions' AND constraint_type='FOREIGN KEY'
+        " 2>/dev/null | grep -q '^1$'
+      timeout: 15s
+      failureMessage: Create a "transactions" table with a FOREIGN KEY referencing accounts(id).
+
+finish:
+  markdown: finish.md

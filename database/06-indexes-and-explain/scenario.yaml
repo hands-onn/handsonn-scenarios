@@ -1,0 +1,98 @@
+apiVersion: labs.handsonn.dev/v1
+kind: Scenario
+id: indexes-and-explain
+title: Indexes and EXPLAIN
+summary: Read a query plan, add an index, and watch a sequential scan become an index scan.
+difficulty: advanced
+tags: [database, postgres, performance, indexing]
+duration: 30m
+topic: database
+issueType: indexing
+
+session:
+  ttl: 45m
+  quota:
+    cpu: "2"
+    memory: 2Gi
+    pods: 2
+
+environment:
+  type: linux
+  pods:
+    - name: shell
+      image: nicolaka/netshoot:latest
+      primary: true
+      command: ["sleep", "infinity"]
+      resources:
+        cpu: "500m"
+        memory: 512Mi
+    - name: db
+      image: postgres:15-alpine
+      expose: [5432]
+      addCapabilities: [SETUID, SETGID, CHOWN]
+      env:
+        - name: POSTGRES_PASSWORD
+          value: lab
+        - name: POSTGRES_DB
+          value: shop
+      resources:
+        cpu: "1"
+        memory: 1Gi
+
+  init:
+    - pod: shell
+      run: |
+        set -e
+        apk add --no-cache postgresql-client >/dev/null 2>&1
+        for i in $(seq 1 30); do
+          PGPASSWORD=lab psql -h db -U postgres -d shop -c 'SELECT 1' >/dev/null 2>&1 && break
+          sleep 2
+        done
+        # 100k rows so a seq scan is clearly measurable and the planner
+        # prefers an index once one exists.
+        PGPASSWORD=lab psql -h db -U postgres -d shop <<'SQL'
+        CREATE TABLE events (
+          id      SERIAL PRIMARY KEY,
+          user_id INT NOT NULL,
+          action  TEXT NOT NULL,
+          ts      TIMESTAMPTZ NOT NULL DEFAULT now()
+        );
+        INSERT INTO events (user_id, action)
+        SELECT (random()*10000)::int, 'click'
+        FROM generate_series(1, 100000);
+        ANALYZE events;
+        SQL
+
+steps:
+  - id: seq-scan
+    title: Observe a sequential scan
+    instructions: steps/01-seq-scan.md
+    hint: steps/01-hint.md
+    verify:
+      # Before indexing, EXPLAIN on a user_id filter uses a Seq Scan.
+      # Learner records the scan type they saw.
+      run: grep -qi 'seq' /tmp/plan_before 2>/dev/null
+      failureMessage: Run EXPLAIN on a query filtering by user_id and save the scan type (it'll be a Seq Scan) to /tmp/plan_before.
+
+  - id: add-index
+    title: Add an index
+    instructions: steps/02-add-index.md
+    hint: steps/02-hint.md
+    verify:
+      run: |
+        PGPASSWORD=lab psql -h db -U postgres -d shop -tAc \
+          "SELECT count(*) FROM pg_indexes WHERE tablename='events' AND indexdef ILIKE '%user_id%'" \
+          2>/dev/null | grep -q '^1$'
+      timeout: 15s
+      failureMessage: Create an index on events(user_id).
+
+  - id: index-scan
+    title: Confirm the plan now uses the index
+    instructions: steps/03-index-scan.md
+    verify:
+      # After the index + ANALYZE, EXPLAIN should show an Index Scan.
+      run: grep -qi 'index' /tmp/plan_after 2>/dev/null
+      failureMessage: Re-run EXPLAIN on the same query and save the new scan type (Index Scan) to /tmp/plan_after.
+
+finish:
+  markdown: finish.md

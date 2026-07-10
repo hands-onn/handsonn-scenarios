@@ -1,0 +1,109 @@
+apiVersion: labs.handsonn.dev/v1
+kind: Scenario
+id: locks-and-debugging
+title: Diagnose a Blocked Query
+summary: A transaction is holding a lock and blocking others. Find the culprit with pg_stat_activity and clear it.
+difficulty: advanced
+tags: [database, postgres, debugging, locks]
+duration: 30m
+topic: database
+issueType: debugging
+
+session:
+  ttl: 45m
+  quota:
+    cpu: "2"
+    memory: 2Gi
+    pods: 2
+
+environment:
+  type: linux
+  pods:
+    - name: shell
+      image: nicolaka/netshoot:latest
+      primary: true
+      command: ["sleep", "infinity"]
+      resources:
+        cpu: "500m"
+        memory: 512Mi
+    - name: db
+      image: postgres:15-alpine
+      expose: [5432]
+      addCapabilities: [SETUID, SETGID, CHOWN]
+      env:
+        - name: POSTGRES_PASSWORD
+          value: lab
+        - name: POSTGRES_DB
+          value: shop
+      resources:
+        cpu: "500m"
+        memory: 512Mi
+
+  init:
+    - pod: shell
+      run: |
+        set -e
+        apk add --no-cache postgresql-client >/dev/null 2>&1
+        for i in $(seq 1 30); do
+          PGPASSWORD=lab psql -h db -U postgres -d shop -c 'SELECT 1' >/dev/null 2>&1 && break
+          sleep 2
+        done
+        PGPASSWORD=lab psql -h db -U postgres -d shop <<'SQL'
+        CREATE TABLE inventory (
+          sku   TEXT PRIMARY KEY,
+          qty   INT NOT NULL
+        );
+        INSERT INTO inventory VALUES ('A1', 10), ('B2', 5);
+        SQL
+        # Start a background psql that opens a transaction, locks row A1
+        # with SELECT ... FOR UPDATE, and holds it open (idle in
+        # transaction) for the life of the lab. This is the "culprit".
+        nohup sh -c 'PGPASSWORD=lab psql -h db -U postgres -d shop -c "
+          BEGIN;
+          UPDATE inventory SET qty = qty - 1 WHERE sku = '"'"'A1'"'"';
+          SELECT pg_sleep(3600);
+        "' >/dev/null 2>&1 &
+        sleep 2
+
+steps:
+  - id: observe-block
+    title: Reproduce the block
+    instructions: steps/01-observe-block.md
+    hint: steps/01-hint.md
+    verify:
+      # Learner confirms a competing UPDATE on A1 blocks (they run it with
+      # a short lock_timeout and see it fail), recording proof.
+      run: grep -qi 'lock\|timeout\|blocked' /tmp/block_proof 2>/dev/null
+      failureMessage: Run an UPDATE on sku A1 with a short lock_timeout; it will fail because a lock is held. Save the outcome to /tmp/block_proof.
+
+  - id: find-blocker
+    title: Find the blocking session
+    instructions: steps/02-find-blocker.md
+    hint: steps/02-hint.md
+    verify:
+      # Learner writes the blocking PID to /tmp/blocker_pid; verify it's a
+      # real backend pid currently in a transaction.
+      run: |
+        pid=$(cat /tmp/blocker_pid 2>/dev/null | tr -dc '0-9')
+        test -n "$pid" && PGPASSWORD=lab psql -h db -U postgres -d shop -tAc \
+          "SELECT count(*) FROM pg_stat_activity WHERE pid=$pid AND state LIKE 'idle in transaction%'" \
+          2>/dev/null | grep -q '^1$'
+      timeout: 15s
+      failureMessage: Use pg_stat_activity / pg_blocking_pids() to find the blocking backend PID and save it to /tmp/blocker_pid.
+
+  - id: terminate
+    title: Terminate the blocker
+    instructions: steps/03-terminate.md
+    hint: steps/03-hint.md
+    verify:
+      # After pg_terminate_backend, no session should be idle-in-transaction
+      # holding the lock, and A1 should be updatable.
+      run: |
+        PGPASSWORD=lab psql -h db -U postgres -d shop -tAc \
+          "SELECT count(*) FROM pg_stat_activity WHERE state LIKE 'idle in transaction%'" \
+          2>/dev/null | grep -q '^0$'
+      timeout: 15s
+      failureMessage: Terminate the blocking backend with pg_terminate_backend(pid). No idle-in-transaction sessions should remain.
+
+finish:
+  markdown: finish.md

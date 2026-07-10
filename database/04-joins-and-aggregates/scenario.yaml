@@ -1,0 +1,100 @@
+apiVersion: labs.handsonn.dev/v1
+kind: Scenario
+id: joins-and-aggregates
+title: Joins and Aggregates
+summary: Combine tables with JOIN and summarize with GROUP BY on a Postgres orders schema.
+difficulty: intermediate
+tags: [database, sql, postgres, joins]
+duration: 30m
+topic: database
+issueType: sql
+
+session:
+  ttl: 45m
+  quota:
+    cpu: "2"
+    memory: 2Gi
+    pods: 2
+
+environment:
+  type: linux
+  pods:
+    - name: shell
+      image: nicolaka/netshoot:latest
+      primary: true
+      command: ["sleep", "infinity"]
+      resources:
+        cpu: "500m"
+        memory: 512Mi
+    - name: db
+      image: postgres:15-alpine
+      expose: [5432]
+      # postgres needs these to run its entrypoint under the sandbox.
+      addCapabilities: [SETUID, SETGID, CHOWN]
+      env:
+        - name: POSTGRES_PASSWORD
+          value: lab
+        - name: POSTGRES_DB
+          value: shop
+      resources:
+        cpu: "500m"
+        memory: 512Mi
+
+  init:
+    - pod: shell
+      run: |
+        set -e
+        apk add --no-cache postgresql-client >/dev/null 2>&1
+        for i in $(seq 1 30); do
+          PGPASSWORD=lab psql -h db -U postgres -d shop -c 'SELECT 1' >/dev/null 2>&1 && break
+          sleep 2
+        done
+        PGPASSWORD=lab psql -h db -U postgres -d shop <<'SQL'
+        CREATE TABLE customers (
+          id   SERIAL PRIMARY KEY,
+          name TEXT NOT NULL,
+          city TEXT NOT NULL
+        );
+        CREATE TABLE orders (
+          id          SERIAL PRIMARY KEY,
+          customer_id INT REFERENCES customers(id),
+          amount      NUMERIC(10,2) NOT NULL,
+          status      TEXT NOT NULL
+        );
+        INSERT INTO customers (name, city) VALUES
+          ('Alice','Berlin'), ('Bob','Paris'), ('Carol','Berlin'), ('Dan','Oslo');
+        INSERT INTO orders (customer_id, amount, status) VALUES
+          (1, 100.00, 'paid'), (1, 50.00, 'paid'), (2, 75.00, 'paid'),
+          (2, 20.00, 'refunded'), (3, 200.00, 'paid'), (1, 30.00, 'refunded');
+        -- Dan (id 4) has no orders — useful for the LEFT JOIN step.
+        SQL
+
+steps:
+  - id: inner-join
+    title: Join orders to customers
+    instructions: steps/01-inner-join.md
+    hint: steps/01-hint.md
+    verify:
+      # Number of rows joining orders→customers = 6 (all orders have a customer).
+      run: grep -q '^6$' /tmp/join_count 2>/dev/null
+      failureMessage: INNER JOIN orders to customers and write the row count to /tmp/join_count. Expected 6.
+
+  - id: group-by
+    title: Total paid revenue per customer
+    instructions: steps/02-group-by.md
+    hint: steps/02-hint.md
+    verify:
+      # Top-spending customer on PAID orders: Carol=200, Alice=150, Bob=75. Answer: Carol.
+      run: grep -qi '^Carol$' /tmp/top_customer 2>/dev/null
+      failureMessage: Sum paid order amounts per customer, find the top spender's name, write it to /tmp/top_customer. Expected Carol.
+
+  - id: left-join
+    title: Find customers with no orders
+    instructions: steps/03-left-join.md
+    verify:
+      # LEFT JOIN + IS NULL → Dan. Count of customers with zero orders = 1.
+      run: grep -q '^1$' /tmp/no_orders 2>/dev/null
+      failureMessage: Use a LEFT JOIN to count customers with no orders; write the count to /tmp/no_orders. Expected 1 (Dan).
+
+finish:
+  markdown: finish.md
