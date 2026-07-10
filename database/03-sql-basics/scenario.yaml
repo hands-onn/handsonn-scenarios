@@ -40,11 +40,12 @@ environment:
         memory: 512Mi
 
   init:
-    # Wait for postgres to accept connections, then seed a products table.
-    # Runs from the shell pod (which has psql) against the db service.
+    # Install the psql client (netshoot no longer bundles it), wait for
+    # postgres to accept connections, then seed a products table.
     - pod: shell
       run: |
         set -e
+        apk add --no-cache postgresql-client >/dev/null 2>&1
         for i in $(seq 1 30); do
           PGPASSWORD=lab psql -h db -U postgres -d shop -c 'SELECT 1' >/dev/null 2>&1 && break
           sleep 2
