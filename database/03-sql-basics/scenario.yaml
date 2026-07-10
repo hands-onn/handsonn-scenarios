@@ -1,0 +1,101 @@
+apiVersion: labs.handsonn.dev/v1
+kind: Scenario
+id: sql-basics
+title: SQL Basics — SELECT, WHERE, ORDER BY
+summary: Query a seeded Postgres database — filter, sort, and limit rows.
+difficulty: beginner
+tags: [database, sql, postgres]
+duration: 20m
+topic: database
+issueType: sql
+
+session:
+  ttl: 45m
+  quota:
+    cpu: "2"
+    memory: 2Gi
+    pods: 2
+
+environment:
+  type: linux
+  pods:
+    # netshoot ships psql. The terminal attaches here; verify runs here too.
+    - name: shell
+      image: nicolaka/netshoot:latest
+      primary: true
+      command: ["sleep", "infinity"]
+      resources:
+        cpu: "500m"
+        memory: 512Mi
+    - name: db
+      image: postgres:15-alpine
+      expose: [5432]
+      env:
+        - name: POSTGRES_PASSWORD
+          value: lab
+        - name: POSTGRES_DB
+          value: shop
+      resources:
+        cpu: "500m"
+        memory: 512Mi
+
+  init:
+    # Wait for postgres to accept connections, then seed a products table.
+    # Runs from the shell pod (which has psql) against the db service.
+    - pod: shell
+      run: |
+        set -e
+        for i in $(seq 1 30); do
+          PGPASSWORD=lab psql -h db -U postgres -d shop -c 'SELECT 1' >/dev/null 2>&1 && break
+          sleep 2
+        done
+        PGPASSWORD=lab psql -h db -U postgres -d shop <<'SQL'
+        CREATE TABLE products (
+          id       SERIAL PRIMARY KEY,
+          name     TEXT NOT NULL,
+          category TEXT NOT NULL,
+          price    NUMERIC(10,2) NOT NULL,
+          in_stock INT NOT NULL
+        );
+        INSERT INTO products (name, category, price, in_stock) VALUES
+          ('Widget',    'hardware', 9.99,  120),
+          ('Gizmo',     'hardware', 24.50, 0),
+          ('Sprocket',  'hardware', 4.25,  50),
+          ('Manual',    'books',    12.00, 8),
+          ('Sticker',   'misc',     1.50,  0),
+          ('Cable',     'hardware', 6.75,  200),
+          ('Notebook',  'books',    3.99,  15);
+        SQL
+
+steps:
+  - id: connect
+    title: Connect to the database
+    instructions: steps/01-connect.md
+    hint: steps/01-hint.md
+    verify:
+      run: |
+        PGPASSWORD=lab psql -h db -U postgres -d shop -tAc \
+          "SELECT count(*) FROM products" | grep -q '^7$'
+      timeout: 15s
+      failureMessage: Couldn't reach the products table. Connect with `PGPASSWORD=lab psql -h db -U postgres -d shop`.
+
+  - id: select-where
+    title: Filter with WHERE
+    instructions: steps/02-select-where.md
+    hint: steps/02-hint.md
+    verify:
+      # The learner writes their query's result count to /tmp/answer.
+      # In-stock hardware = Widget, Sprocket, Cable = 3.
+      run: grep -q '^3$' /tmp/answer 2>/dev/null
+      failureMessage: Count hardware products that are in stock (in_stock > 0) and write the number to /tmp/answer. Expected 3.
+
+  - id: order-limit
+    title: Sort and limit
+    instructions: steps/03-order-limit.md
+    verify:
+      # Most expensive product name = Gizmo (24.50).
+      run: grep -qi '^Gizmo$' /tmp/answer2 2>/dev/null
+      failureMessage: Find the single most expensive product's name (ORDER BY ... DESC LIMIT 1) and write it to /tmp/answer2.
+
+finish:
+  markdown: finish.md

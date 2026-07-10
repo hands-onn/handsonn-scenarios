@@ -1,0 +1,1 @@
+The check runs `SELECT count(*) FROM products` and expects 7. If psql can't connect, the db pod may still be starting — wait a few seconds and retry. Password is `lab`, user `postgres`, db `shop`, host `db`.
