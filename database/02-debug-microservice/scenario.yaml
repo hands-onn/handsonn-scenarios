@@ -68,7 +68,12 @@ environment:
         cpu: "500m"
         memory: 512Mi
 
-  # No init needed — netshoot ships with curl, jq, psql, dig, etc. baked in.
+  init:
+    # netshoot ships curl/jq/dig but no psql — install it so the learner
+    # (and step 3's verify) can reach the db. Egress to the Alpine repos
+    # is allowed by the lab NetworkPolicy.
+    - pod: shell
+      run: apk add --no-cache postgresql-client >/dev/null 2>&1
 
 steps:
   - id: reach-api
