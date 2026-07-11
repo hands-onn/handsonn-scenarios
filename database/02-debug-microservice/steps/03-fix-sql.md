@@ -12,4 +12,7 @@ Inspect the view:
 \d+ orders_view
 ```
 
-The `total` column references a column that no longer exists. Replace the view so `total` is computed correctly from `quantity * unit_price`.
+Look at how `total` is computed — it divides by zero, so every query
+against the view raises `division by zero` and the API returns 500.
+Replace the view so `total` is computed correctly from
+`quantity * unit_price`.

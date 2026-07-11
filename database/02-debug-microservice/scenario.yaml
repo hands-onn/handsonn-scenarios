@@ -30,17 +30,13 @@ environment:
         cpu: "1"
         memory: 1Gi
 
-    # PLACEHOLDER image. The real scenario needs a Go/Node service that
-    # exposes /healthz and /orders, intentionally backed by a broken
-    # `orders_view` in postgres so step 3 has a SQL bug to fix.
-    # http-echo just 200s on every path with the request echoed as JSON —
-    # step 1 (healthz reachable) passes, step 2 (/orders returns array)
-    # will fail because echo returns an object. Build the real image and
-    # swap back in to make this scenario actually testable end-to-end.
+    # The real broken service (source: services/broken-api/). On startup
+    # it seeds an `orders` table + a deliberately-broken `orders_view`
+    # (total = unit_price / 0), so /orders 500s until the learner fixes
+    # the view in step 3. Runs its own entrypoint (non-primary pod).
     - name: api
-      image: mendhak/http-https-echo:34
+      image: ghcr.io/hands-onn/hands-onn/broken-api:latest
       expose: [8080]
-      command: ["node", "index.js"]
       env:
         - name: HTTP_PORT
           value: "8080"
@@ -48,6 +44,10 @@ environment:
           value: db
         - name: DB_PORT
           value: "5432"
+        - name: DB_PASSWORD
+          value: lab
+        - name: DB_NAME
+          value: orders
       resources:
         cpu: "500m"
         memory: 512Mi
