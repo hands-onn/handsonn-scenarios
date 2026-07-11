@@ -55,6 +55,10 @@ environment:
     - name: db
       image: postgres:15-alpine
       expose: [5432]
+      # postgres' entrypoint chowns its data dir + drops to the postgres
+      # user — needs these caps or it never starts under the drop-ALL
+      # baseline. All three are on the gateway allowlist.
+      addCapabilities: [SETUID, SETGID, CHOWN]
       env:
         - name: POSTGRES_PASSWORD
           value: lab
