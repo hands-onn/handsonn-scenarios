@@ -1,0 +1,1 @@
+The check just confirms pods `db-0`, `db-1`, `db-2` exist and that `db-0` is owned by a `StatefulSet`. You don't scale or edit anything. If a pod is missing, look at events with `kubectl describe statefulset db`.

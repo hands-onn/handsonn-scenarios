@@ -1,0 +1,141 @@
+apiVersion: labs.handsonn.dev/v1
+kind: Scenario
+id: connection-exhaustion
+title: Too Many Clients Already
+summary: A leaky app has filled every connection slot with idle sessions. Reproduce the exhaustion, find the idle pile in pg_stat_activity, reclaim slots with pg_terminate_backend, and reconnect.
+difficulty: intermediate
+tags: [database, postgres, connections, pooling, debugging]
+duration: 25m
+topic: database
+issueType: debugging
+
+session:
+  ttl: 45m
+  quota:
+    cpu: "2"
+    memory: 2Gi
+    pods: 2
+
+environment:
+  type: linux
+  pods:
+    - name: shell
+      image: nicolaka/netshoot:latest
+      primary: true
+      command: ["sleep", "infinity"]
+      resources:
+        cpu: "500m"
+        memory: 512Mi
+    - name: db
+      image: postgres:15-alpine
+      expose: [5432]
+      # postgres' entrypoint chowns its data dir + drops to the postgres
+      # user — needs these caps under the drop-ALL baseline. All three are
+      # on the gateway allowlist.
+      addCapabilities: [SETUID, SETGID, CHOWN]
+      # Start with a deliberately small connection budget so exhaustion is
+      # reachable in a lab. max_connections=20, of which
+      # superuser_reserved_connections (default 3) are held back for
+      # superusers — leaving 17 slots for ordinary (non-superuser) roles.
+      command:
+        - postgres
+        - -c
+        - max_connections=20
+      env:
+        - name: POSTGRES_PASSWORD
+          value: lab
+        - name: POSTGRES_DB
+          value: shop
+      resources:
+        cpu: "500m"
+        memory: 512Mi
+
+  init:
+    - pod: shell
+      run: |
+        set -e
+        # netshoot has no psql — install the client so the learner (and the
+        # verify scripts) can reach the db. Egress to the Alpine repos is
+        # allowed by the lab NetworkPolicy.
+        apk add --no-cache postgresql-client >/dev/null 2>&1
+        for i in $(seq 1 30); do
+          PGPASSWORD=lab psql -h db -U postgres -d shop -c 'SELECT 1' >/dev/null 2>&1 && break
+          sleep 2
+        done
+        # Create the ordinary application role the "app" connects as. It is
+        # NOT a superuser, so it competes only for the 17 non-reserved slots.
+        PGPASSWORD=lab psql -h db -U postgres -d shop \
+          -c "CREATE ROLE app LOGIN PASSWORD 'lab';" >/dev/null 2>&1 || true
+        # Simulate a leaky connection pool: open 17 connections as `app` and
+        # leave them IDLE (connected, no query running) for the life of the
+        # lab. `sleep 100000 | psql` holds each psql's stdin open so the
+        # session connects and then just sits there. This fills every
+        # non-superuser slot — exactly the "idle connection leak" that pages
+        # on-call at 3am. nohup + & so they survive after init exits.
+        for i in $(seq 1 17); do
+          nohup sh -c 'sleep 100000 | PGPASSWORD=lab psql -h db -U app -d shop' \
+            >/dev/null 2>&1 &
+        done
+        sleep 4
+
+steps:
+  - id: reproduce
+    title: Reproduce the exhaustion
+    instructions: steps/01-reproduce.md
+    hint: steps/01-hint.md
+    verify:
+      # A fresh connection as the ordinary `app` role must currently FAIL
+      # (every non-superuser slot is taken), and the learner must have
+      # captured that error message to /tmp/exhaustion.
+      run: |
+        grep -qiE 'too many clients|connection slots are reserved' /tmp/exhaustion 2>/dev/null || exit 1
+        if PGPASSWORD=lab psql -h db -U app -d shop -tAc 'SELECT 1' >/dev/null 2>&1; then
+          exit 1
+        fi
+        exit 0
+      timeout: 20s
+      failureMessage: Connect as the `app` role (psql -U app). It fails — the pool is saturated. Save that error to /tmp/exhaustion, and leave the slots full.
+
+  - id: diagnose
+    title: See where the slots went
+    instructions: steps/02-diagnose.md
+    hint: steps/02-hint.md
+    verify:
+      # Diagnosis-recording step: the learner runs the GROUP BY state query,
+      # sees a pile of `idle` sessions, and records that finding. We also
+      # assert the idle pile is really there.
+      run: |
+        grep -qi 'idle' /tmp/diagnosis 2>/dev/null || exit 1
+        idle=$(PGPASSWORD=lab psql -h db -U postgres -d shop -tAc \
+          "SELECT count(*) FROM pg_stat_activity WHERE usename='app' AND state='idle'" 2>/dev/null | tr -dc '0-9')
+        test -n "$idle" && test "$idle" -ge 15
+      timeout: 20s
+      failureMessage: Run "SELECT count(*), state FROM pg_stat_activity GROUP BY state" as the postgres superuser. Save the dominant state (idle) to /tmp/diagnosis.
+
+  - id: reclaim
+    title: Reclaim the idle slots
+    instructions: steps/03-reclaim.md
+    hint: steps/03-hint.md
+    verify:
+      # After terminating the idle `app` backends, almost none should remain.
+      run: |
+        idle=$(PGPASSWORD=lab psql -h db -U postgres -d shop -tAc \
+          "SELECT count(*) FROM pg_stat_activity WHERE usename='app' AND state='idle'" 2>/dev/null | tr -dc '0-9')
+        test -n "$idle" && test "$idle" -le 2
+      timeout: 20s
+      failureMessage: Use pg_terminate_backend(pid) to kill the idle `app` sessions. Fewer than 3 should remain.
+
+  - id: recover
+    title: Confirm a fresh connection succeeds
+    instructions: steps/04-recover.md
+    verify:
+      # With slots freed, a brand-new `app` connection now succeeds. The
+      # learner also records the successful result.
+      run: |
+        grep -q '1' /tmp/reconnect 2>/dev/null || exit 1
+        PGPASSWORD=lab psql -h db -U app -d shop -tAc 'SELECT 1' 2>/dev/null | grep -q '^1$'
+      timeout: 20s
+      failureMessage: Open a fresh `app` connection now that slots are free (psql -U app -tAc 'SELECT 1'), and save the result to /tmp/reconnect.
+
+finish:
+  markdown: finish.md

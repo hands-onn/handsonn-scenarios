@@ -1,0 +1,180 @@
+apiVersion: labs.handsonn.dev/v1
+kind: Scenario
+id: diagnose-slow-query
+title: Diagnose a Slow Query with EXPLAIN ANALYZE
+summary: A join between orders and line_items is slow. Read EXPLAIN (ANALYZE, BUFFERS), find the dominant Seq Scan and the bad row estimate, add the right index, and confirm the plan no longer scans sequentially.
+difficulty: advanced
+tags: [database, postgres, performance, explain, indexing, query-plan]
+duration: 30m
+topic: database
+issueType: performance
+
+session:
+  ttl: 45m
+  quota:
+    cpu: "2"
+    memory: 2Gi
+    pods: 2
+
+environment:
+  type: linux
+  pods:
+    # netshoot ships psql-less, so we install postgresql-client in init.
+    # Terminal attaches here; the learner drives psql from this pod.
+    - name: shell
+      image: nicolaka/netshoot:latest
+      primary: true
+      command: ["sleep", "infinity"]
+      resources:
+        cpu: "500m"
+        memory: 512Mi
+
+    - name: db
+      image: postgres:15-alpine
+      expose: [5432]
+      # postgres' entrypoint chowns its data dir + drops to the postgres
+      # user — needs these caps under the drop-ALL baseline. All three
+      # are on the gateway allowlist.
+      addCapabilities: [SETUID, SETGID, CHOWN]
+      env:
+        - name: POSTGRES_PASSWORD
+          value: lab
+        - name: POSTGRES_DB
+          value: shop
+      resources:
+        cpu: "1"
+        memory: 1Gi
+
+  init:
+    - pod: shell
+      run: |
+        set -e
+        # netshoot has no psql; install the client (Alpine egress is allowed).
+        apk add --no-cache postgresql-client >/dev/null 2>&1
+        # Wait for postgres to accept connections.
+        for i in $(seq 1 30); do
+          PGPASSWORD=lab psql -h db -U postgres -d shop -c 'SELECT 1' >/dev/null 2>&1 && break
+          sleep 2
+        done
+        # Seed: 120k orders + ~360k line_items. line_items.order_id is the
+        # JOIN column and is deliberately UN-indexed, so a join filtered by
+        # order status forces a Seq Scan on line_items. status is skewed
+        # (~95% 'shipped') so a naive filter is unselective and the planner's
+        # estimates for the small 'refunded' slice are what we'll fix.
+        PGPASSWORD=lab psql -h db -U postgres -d shop <<'SQL'
+        CREATE TABLE orders (
+          id       SERIAL PRIMARY KEY,
+          customer INT  NOT NULL,
+          status   TEXT NOT NULL,
+          created  TIMESTAMPTZ NOT NULL DEFAULT now()
+        );
+
+        CREATE TABLE line_items (
+          id       SERIAL PRIMARY KEY,
+          order_id INT  NOT NULL,   -- join key, intentionally NOT indexed
+          sku      TEXT NOT NULL,
+          qty      INT  NOT NULL,
+          price    NUMERIC(10,2) NOT NULL
+        );
+
+        -- 120k orders. status is skewed: most are 'shipped', a small slice
+        -- 'refunded' — that skew makes the plan interesting.
+        INSERT INTO orders (customer, status)
+        SELECT (random()*20000)::int,
+               CASE WHEN random() < 0.95 THEN 'shipped'
+                    WHEN random() < 0.99 THEN 'pending'
+                    ELSE 'refunded' END
+        FROM generate_series(1, 120000);
+
+        -- ~3 line items per order => ~360k rows.
+        INSERT INTO line_items (order_id, sku, qty, price)
+        SELECT (random()*119999)::int + 1,
+               'SKU-' || (random()*5000)::int,
+               (random()*4)::int + 1,
+               round((random()*100)::numeric, 2)
+        FROM generate_series(1, 360000);
+
+        -- Index the FK on orders? No. We only index orders.status filter later.
+        ANALYZE orders;
+        ANALYZE line_items;
+        SQL
+
+steps:
+  - id: reproduce
+    title: Reproduce the slow join
+    instructions: steps/01-reproduce.md
+    hint: steps/01-hint.md
+    verify:
+      # The learner captures the full EXPLAIN (ANALYZE, BUFFERS) output to
+      # /tmp/plan_before. We only require that they actually ran it against
+      # the join (the plan must mention both tables).
+      run: |
+        grep -qi 'line_items' /tmp/plan_before 2>/dev/null \
+          && grep -qi 'orders' /tmp/plan_before 2>/dev/null
+      failureMessage: Run EXPLAIN (ANALYZE, BUFFERS) on the orders/line_items join and save the full output to /tmp/plan_before.
+
+  - id: diagnose
+    title: Find the dominant Seq Scan
+    instructions: steps/02-diagnose.md
+    hint: steps/02-hint.md
+    verify:
+      # Diagnosis-recording: the plan-before must show a Seq Scan, and the
+      # learner records which table it hits. line_items is the un-indexed
+      # side of the join, so that's the culprit.
+      run: |
+        grep -qi 'seq scan' /tmp/plan_before 2>/dev/null \
+          && grep -qi 'line_items' /tmp/diagnosis 2>/dev/null
+      failureMessage: In /tmp/diagnosis, name the table whose Seq Scan dominates the join cost (hint - it's the un-indexed join side).
+
+  - id: add-index
+    title: Index the join column
+    instructions: steps/03-add-index.md
+    hint: steps/03-hint.md
+    verify:
+      run: |
+        PGPASSWORD=lab psql -h db -U postgres -d shop -tAc \
+          "SELECT count(*) FROM pg_indexes WHERE tablename='line_items' AND indexdef ILIKE '%order_id%'" \
+          2>/dev/null | grep -q '^1$'
+      timeout: 20s
+      failureMessage: Create a B-tree index on line_items(order_id), then ANALYZE line_items.
+
+  - id: confirm
+    title: Confirm the plan no longer Seq Scans line_items
+    instructions: steps/04-confirm.md
+    hint: steps/04-hint.md
+    verify:
+      # Re-run the plan live and assert there is no "Seq Scan on line_items"
+      # anymore. We match the exact table on the scan node so an unrelated
+      # seq scan (e.g. tiny orders) doesn't fail the check.
+      run: |
+        PGPASSWORD=lab psql -h db -U postgres -d shop -tAc \
+          "EXPLAIN SELECT o.id, o.status, li.sku, li.qty
+             FROM orders o
+             JOIN line_items li ON li.order_id = o.id
+            WHERE o.status = 'refunded'" 2>/dev/null \
+          | grep -Eiq 'seq scan on line_items' && exit 1
+        exit 0
+      timeout: 20s
+      failureMessage: The plan still shows "Seq Scan on line_items". Ensure the index is on line_items(order_id) and you ran ANALYZE line_items.
+
+  - id: verify-index-scan
+    title: Verify the index is actually used
+    instructions: steps/05-verify-index-scan.md
+    hint: steps/05-hint.md
+    verify:
+      # Positive assertion: line_items must now be reached via an index
+      # (Index Scan or Bitmap Index/Heap Scan on the new index). Also make
+      # the learner record the after-plan for their own reference.
+      run: |
+        PGPASSWORD=lab psql -h db -U postgres -d shop -tAc \
+          "EXPLAIN SELECT o.id, o.status, li.sku, li.qty
+             FROM orders o
+             JOIN line_items li ON li.order_id = o.id
+            WHERE o.status = 'refunded'" 2>/dev/null \
+          | grep -Eiq 'index.*(scan|line_items|order_id)' \
+          && grep -qi 'index' /tmp/plan_after 2>/dev/null
+      timeout: 20s
+      failureMessage: Re-run EXPLAIN (ANALYZE, BUFFERS) on the join, confirm line_items is reached via an index, and save the output to /tmp/plan_after.
+
+finish:
+  markdown: finish.md

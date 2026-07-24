@@ -1,0 +1,1 @@
+Run `kubectl delete pod db-1`. The StatefulSet immediately recreates a pod named `db-1` still referencing PVC `data-db-1` (the claim is never deleted with the pod). The check reads `db-1`'s `data` volume claimName and expects `data-db-1`. If it's not back yet, wait a few seconds and retry.

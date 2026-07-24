@@ -1,0 +1,1 @@
+Plain `kill <PID>` sends SIGTERM (15) — no `-9` needed here, because this daemon shuts down cleanly on TERM. After sending, confirm: `/tmp/daemon.cleanup` exists, `/tmp/daemon.pid` is gone, and the process is no longer alive (`ps -o pid,stat | grep -w <PID>` shows nothing, or state `Z` — a zombie is dead, not running). The idle loop can take up to ~1s to notice the signal.

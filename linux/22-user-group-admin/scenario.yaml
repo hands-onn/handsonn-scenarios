@@ -1,0 +1,154 @@
+apiVersion: labs.handsonn.dev/v1
+kind: Scenario
+id: user-group-admin
+title: Provision a Deploy Service Account
+summary: Stand up a locked-down deploy service account the right way — a deployers group, a system user with a nologin shell, a setgid shared dir that forces group inheritance, and a scoped, syntax-validated sudoers.d drop-in.
+difficulty: intermediate
+tags: [linux, users, groups, permissions, setgid, sudoers]
+duration: 30m
+topic: linux
+issueType: shell
+
+# Runs-as-root note: creating groups/users and writing under /etc/sudoers.d
+# all require root. The lab sandbox drops ALL Linux capabilities by default;
+# this pod requests SETUID, SETGID and CHOWN via `addCapabilities` (the
+# gateway allowlist) so shadow-utils `useradd -m` can assign the account's
+# uid/gid and hand it its home directory. If your gateway does NOT honor
+# these caps, useradd may fail to create/own the home dir — see finish.md.
+session:
+  ttl: 30m
+  quota:
+    cpu: "2"
+    memory: 2Gi
+    pods: 1
+
+environment:
+  type: linux
+  pods:
+    - name: shell
+      image: nicolaka/netshoot:latest
+      primary: true
+      command: ["sleep", "infinity"]
+      addCapabilities: [SETUID, SETGID, CHOWN]
+      resources:
+        cpu: "500m"
+        memory: 512Mi
+  init:
+    # Start from a clean slate: no deployers group, no deploy user, an
+    # empty /srv, and no drop-in. Everything the learner needs to build is
+    # deliberately absent so each step asserts real, freshly-created state.
+    # We only pre-create the parent /srv so the learner focuses on /srv/app.
+    - pod: shell
+      run: |
+        set -e
+        mkdir -p /srv
+        chmod 755 /srv
+        # netshoot is Alpine/busybox — it ships adduser/addgroup but NOT
+        # shadow-utils (groupadd/useradd/usermod) or sudo/visudo, which this
+        # lab teaches. Install them at provisioning time (needs Alpine
+        # package egress). `shadow` provides the *add/*mod tools; `sudo`
+        # provides sudo + visudo.
+        apk add --no-cache shadow sudo >/dev/null 2>&1 \
+          || echo "WARN: apk add shadow sudo failed (no egress?)" >&2
+        # Post-install sanity check: fail loud during provisioning (not
+        # mid-lab) if any required tool is still missing.
+        for t in groupadd useradd usermod visudo getent stat; do
+          command -v "$t" >/dev/null 2>&1 || echo "WARN: $t missing from image" >&2
+        done
+
+steps:
+  - id: create-group
+    title: Create the deployers group
+    instructions: steps/01-create-group.md
+    verify:
+      # Real-state: the group must exist. getent reads NSS (files here), so
+      # a hit proves the group is in /etc/group. `id -g` alone is not enough
+      # because no user is in it yet.
+      run: |
+        getent group deployers >/dev/null 2>&1
+      failureMessage: "No 'deployers' group yet. Create it with `groupadd deployers`, then confirm with `getent group deployers`."
+
+  - id: create-user
+    title: Create the deploy system user
+    instructions: steps/02-create-user.md
+    hint: steps/02-hint.md
+    verify:
+      # Real-state: the account exists, has a home dir, and its login shell
+      # is a nologin-family shell (interactive login is denied). We check
+      # the shell field of the passwd entry rather than trusting `id`.
+      run: |
+        getent passwd deploy >/dev/null 2>&1 || exit 1
+        shell=$(getent passwd deploy | cut -d: -f7)
+        case "$shell" in
+          *nologin|*false) : ;;
+          *) exit 1 ;;
+        esac
+        home=$(getent passwd deploy | cut -d: -f6)
+        test -d "$home"
+      failureMessage: "The 'deploy' account must exist with a home dir and a nologin shell. Try `useradd -r -m -s /sbin/nologin deploy`, then `getent passwd deploy`."
+
+  - id: add-to-group
+    title: Make deploy a member of deployers
+    instructions: steps/03-add-to-group.md
+    verify:
+      # Real-state: deploy must be a secondary member of deployers. `id -nG`
+      # lists all groups the account belongs to; grep for the group name as
+      # a whole word so 'deployers2' etc. can't false-pass.
+      run: |
+        id -nG deploy 2>/dev/null | tr ' ' '\n' | grep -qx deployers
+      failureMessage: "deploy is not in the deployers group yet. Add it with `usermod -aG deployers deploy` (note the -a — without it you'd wipe other memberships), then `id deploy`."
+
+  - id: setgid-dir
+    title: Build the shared setgid directory and prove inheritance
+    instructions: steps/04-setgid-dir.md
+    hint: steps/04-hint.md
+    verify:
+      # Real-state, three assertions:
+      #  1. /srv/app is group-owned by deployers,
+      #  2. its mode is exactly 2775 (setgid bit + rwxrwxr-x),
+      #  3. inheritance actually works: a file the learner created inside
+      #     it is group-owned by deployers, not by root's primary group.
+      # (2) already implies setgid, but we also grep the symbolic mode so
+      # the failure message can point at the missing 's'.
+      run: |
+        test -d /srv/app || exit 1
+        grp=$(stat -c '%G' /srv/app)
+        test "$grp" = "deployers" || exit 1
+        mode=$(stat -c '%a' /srv/app)
+        test "$mode" = "2775" || exit 1
+        stat -c '%A' /srv/app | grep -q '^drwxrwsr-x' || exit 1
+        # Prove inheritance: at least one child (file or dir) was created
+        # under /srv/app and inherited the deployers group from the setgid
+        # parent. `find -exec stat` is glob-safe and indentation-safe.
+        find /srv/app -mindepth 1 -exec stat -c '%G' {} ';' 2>/dev/null \
+          | grep -qx deployers
+      timeout: 45s
+      failureMessage: "/srv/app must be group=deployers, mode 2775 (drwxrwsr-x — the setgid 's'), and contain at least one file/dir that inherited the deployers group. Set it with `chgrp deployers /srv/app && chmod 2775 /srv/app`, then create a file inside and check `stat -c '%G' /srv/app/<file>`."
+
+  - id: sudoers-dropin
+    title: Grant a scoped, validated sudoers rule
+    instructions: steps/05-sudoers-dropin.md
+    hint: steps/05-hint.md
+    verify:
+      # Real-state, three assertions:
+      #  1. the drop-in exists and is mode 0440 (sudo refuses looser modes),
+      #  2. it passes `visudo -cf` syntax validation,
+      #  3. it actually contains a rule for the deployers group (scoped, not
+      #     a blanket ALL=(ALL) NOPASSWD: ALL) — we require a %deployers line
+      #     that names a command path rather than the bare ALL command spec.
+      run: |
+        f=/etc/sudoers.d/deployers
+        test -f "$f" || exit 1
+        mode=$(stat -c '%a' "$f")
+        test "$mode" = "440" || exit 1
+        visudo -cf "$f" >/dev/null 2>&1 || exit 1
+        # A rule targeting the deployers group must be present.
+        grep -Eq '^[[:space:]]*%deployers[[:space:]]+' "$f" || exit 1
+        # Reject a wide-open grant: the %deployers rule must not end in a
+        # bare `ALL` command spec (that would be sudo-to-anything).
+        ! grep -Eq '^[[:space:]]*%deployers[[:space:]].*=\(?[^)]*\)?[[:space:]]*(NOPASSWD:[[:space:]]*)?ALL[[:space:]]*$' "$f"
+      timeout: 45s
+      failureMessage: "Create /etc/sudoers.d/deployers (mode 0440) with a SCOPED rule for %deployers (name specific command paths, not a bare ALL), then validate it with `visudo -cf /etc/sudoers.d/deployers`. A blanket `%deployers ALL=(ALL) NOPASSWD: ALL` is rejected."
+
+finish:
+  markdown: finish.md

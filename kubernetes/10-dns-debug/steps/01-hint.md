@@ -1,0 +1,1 @@
+`nslookup orders` returns a ClusterIP, so DNS is not the problem — the Service exists and resolves. The curl hangs because the Service has nowhere to forward the request. Nothing to fix yet; just confirm both Deployments are `Running`, then move on to inspect the Service's Endpoints.

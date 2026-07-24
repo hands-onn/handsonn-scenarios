@@ -1,0 +1,1 @@
+`kubectl autoscale deployment cpu-worker --min=1 --max=5 --cpu-percent=50` creates the HPA in one line. The object is named after the target Deployment (`cpu-worker`) by default. Check `kubectl get hpa cpu-worker -o yaml` if the verify complains — it wants `scaleTargetRef.kind=Deployment`, `name=cpu-worker`, `minReplicas=1`, `maxReplicas=5`.

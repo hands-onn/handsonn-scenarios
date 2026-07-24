@@ -1,0 +1,222 @@
+apiVersion: labs.handsonn.dev/v1
+kind: Scenario
+id: deadlock-untangle
+title: Untangle a Deadlock
+summary: Two transfers grab the same rows in opposite order and deadlock. Reproduce it deterministically, read the cycle from pg_blocking_pids and the log, then fix it with a consistent lock order so both commit.
+difficulty: advanced
+tags: [database, postgres, deadlock, locks, concurrency, transactions]
+duration: 35m
+topic: database
+issueType: debugging
+
+session:
+  ttl: 45m
+  quota:
+    cpu: "2"
+    memory: 2Gi
+    pods: 2
+
+environment:
+  type: linux
+  # ENVIRONMENT NOTE: a real deadlock needs TWO transactions holding one
+  # lock each and each waiting on the other. There is only ONE terminal
+  # (the shell pod). We make it deterministic by shipping two transfer
+  # scripts and a tiny "barrier" protocol: each script takes its first
+  # lock, touches a marker file, then waits for the other's marker before
+  # reaching for the second lock. Run as two background psql jobs, the
+  # cycle forms every time and Postgres' deadlock detector picks a victim.
+  pods:
+    - name: shell
+      image: nicolaka/netshoot:latest
+      primary: true
+      command: ["sleep", "infinity"]
+      resources:
+        cpu: "500m"
+        memory: 512Mi
+    - name: db
+      image: postgres:15-alpine
+      expose: [5432]
+      # postgres' entrypoint chowns its data dir + drops to the postgres
+      # user; needs these caps under the drop-ALL baseline. All on the
+      # gateway allowlist.
+      addCapabilities: [SETUID, SETGID, CHOWN]
+      env:
+        - name: POSTGRES_PASSWORD
+          value: lab
+        - name: POSTGRES_DB
+          value: bank
+      resources:
+        cpu: "500m"
+        memory: 512Mi
+
+  init:
+    - pod: shell
+      run: |
+        set -e
+        # netshoot has no psql baked in; egress to Alpine repos is allowed.
+        apk add --no-cache postgresql-client >/dev/null 2>&1
+        for i in $(seq 1 30); do
+          PGPASSWORD=lab psql -h db -U postgres -d bank -c 'SELECT 1' >/dev/null 2>&1 && break
+          sleep 2
+        done
+
+        # Seed: two accounts. A transfer moves money between them and must
+        # lock BOTH rows (SELECT ... FOR UPDATE) before writing.
+        PGPASSWORD=lab psql -h db -U postgres -d bank <<'SQL'
+        DROP TABLE IF EXISTS accounts;
+        CREATE TABLE accounts (
+          id      INT PRIMARY KEY,
+          owner   TEXT NOT NULL,
+          balance NUMERIC NOT NULL CHECK (balance >= 0)
+        );
+        INSERT INTO accounts VALUES
+          (1, 'alice', 1000),
+          (2, 'bob',   1000);
+        SQL
+
+        # deadlock_timeout defaults to 1s already; set it explicitly so
+        # detection stays snappy and the lab never stalls. Two separate
+        # -c flags: ALTER SYSTEM cannot run inside the implicit txn that
+        # psql wraps a multi-statement -c string in.
+        PGPASSWORD=lab psql -h db -U postgres -d bank \
+          -c "ALTER SYSTEM SET deadlock_timeout = '1s'" \
+          -c "SELECT pg_reload_conf()" >/dev/null
+
+        # ---- The BROKEN transfer (locks in the order it was asked to) ----
+        # transfer.sh SRC DST AMOUNT LABEL
+        # Locks SRC first, drops a marker, waits for the peer's marker, then
+        # reaches for DST. Two runs with swapped SRC/DST => guaranteed cycle.
+        cat > /tmp/transfer.sh <<'EOF'
+        #!/bin/sh
+        SRC="$1"; DST="$2"; AMT="$3"; LABEL="$4"
+        rm -f "/tmp/${LABEL}.rc"
+        PGPASSWORD=lab psql -h db -U postgres -d bank -v ON_ERROR_STOP=0 <<PSQL > "/tmp/${LABEL}.log" 2>&1
+        BEGIN;
+        SELECT balance FROM accounts WHERE id = ${SRC} FOR UPDATE;
+        \! touch /tmp/${LABEL}.locked
+        \! while [ ! -f /tmp/peer_of_${LABEL}.locked ]; do sleep 0.2; done
+        UPDATE accounts SET balance = balance - ${AMT} WHERE id = ${SRC};
+        UPDATE accounts SET balance = balance + ${AMT} WHERE id = ${DST};
+        COMMIT;
+        PSQL
+        echo $? > "/tmp/${LABEL}.rc"
+        EOF
+        chmod +x /tmp/transfer.sh
+
+        # ---- The FIXED transfer (always locks lower id first) ----
+        # fixed_transfer.sh SRC DST AMOUNT LABEL — canonical ascending-id order.
+        # NOTE: NO barrier here on purpose. Both directions now take their
+        # FIRST lock on the SAME (lowest) row, so they genuinely contend on
+        # it; the loser simply waits for the winner to commit. A barrier
+        # that waited for a peer marker would deadlock the *shell* (the
+        # blocked session can never reach its \! touch), so we drop it and
+        # just run both concurrently — no cycle can form, both commit.
+        cat > /tmp/fixed_transfer.sh <<'EOF'
+        #!/bin/sh
+        SRC="$1"; DST="$2"; AMT="$3"; LABEL="$4"
+        LO=$SRC; HI=$DST
+        if [ "$SRC" -gt "$DST" ]; then LO=$DST; HI=$SRC; fi
+        rm -f "/tmp/${LABEL}.rc"
+        PGPASSWORD=lab psql -h db -U postgres -d bank -v ON_ERROR_STOP=0 <<PSQL > "/tmp/${LABEL}.log" 2>&1
+        BEGIN;
+        SELECT balance FROM accounts WHERE id = ${LO} FOR UPDATE;
+        SELECT balance FROM accounts WHERE id = ${HI} FOR UPDATE;
+        UPDATE accounts SET balance = balance - ${AMT} WHERE id = ${SRC};
+        UPDATE accounts SET balance = balance + ${AMT} WHERE id = ${DST};
+        COMMIT;
+        PSQL
+        echo $? > "/tmp/${LABEL}.rc"
+        EOF
+        chmod +x /tmp/fixed_transfer.sh
+
+        # Helper: run two labelled transfers concurrently and cross-wire
+        # their "locked" markers so each waits for the other. Usage:
+        #   run_pair.sh <script> "SRC1 DST1 AMT1" "SRC2 DST2 AMT2"
+        cat > /tmp/run_pair.sh <<'EOF'
+        #!/bin/sh
+        SCRIPT="$1"; ARGS_A="$2"; ARGS_B="$3"
+        rm -f /tmp/sess_a.* /tmp/sess_b.* /tmp/peer_of_sess_a.locked /tmp/peer_of_sess_b.locked
+        # peer_of_X.locked is what session X waits on; wire it to the other.
+        ln -sf /tmp/sess_b.locked /tmp/peer_of_sess_a.locked
+        ln -sf /tmp/sess_a.locked /tmp/peer_of_sess_b.locked
+        sh "$SCRIPT" $ARGS_A sess_a &
+        sh "$SCRIPT" $ARGS_B sess_b &
+        wait
+        echo "sess_a rc=$(cat /tmp/sess_a.rc 2>/dev/null)  sess_b rc=$(cat /tmp/sess_b.rc 2>/dev/null)"
+        EOF
+        chmod +x /tmp/run_pair.sh
+
+steps:
+  - id: reproduce
+    title: Reproduce the deadlock
+    instructions: steps/01-reproduce.md
+    hint: steps/01-hint.md
+    verify:
+      # Running the two BROKEN transfers concurrently must produce a
+      # "deadlock detected" in exactly one session's psql log.
+      run: |
+        sh /tmp/run_pair.sh /tmp/transfer.sh "1 2 100" "2 1 100" >/dev/null 2>&1
+        grep -qi 'deadlock detected' /tmp/sess_a.log /tmp/sess_b.log
+      timeout: 30s
+      successMessage: A deadlock was detected — Postgres broke the cycle by aborting one transaction.
+      failureMessage: Run `sh /tmp/run_pair.sh /tmp/transfer.sh "1 2 100" "2 1 100"`. One session's log should contain "deadlock detected".
+
+  - id: victim
+    title: Capture the error and the victim
+    instructions: steps/02-victim.md
+    hint: steps/02-hint.md
+    verify:
+      # Learner records which session was the victim. Accept sess_a or
+      # sess_b — and cross-check it matches the log that actually errored.
+      run: |
+        v=$(tr '[:upper:]' '[:lower:]' < /tmp/victim.txt 2>/dev/null)
+        echo "$v" | grep -Eq 'sess_a|sess_b|session a|session b|a\b|b\b' || exit 1
+        # The recorded victim must be the session whose log shows the deadlock.
+        if grep -qi 'deadlock detected' /tmp/sess_a.log 2>/dev/null; then
+          echo "$v" | grep -Eq 'sess_a|session a|(^|[^a-z])a([^a-z]|$)'
+        else
+          echo "$v" | grep -Eq 'sess_b|session b|(^|[^a-z])b([^a-z]|$)'
+        fi
+      timeout: 15s
+      failureMessage: Read /tmp/sess_a.log and /tmp/sess_b.log, find which one got "deadlock detected" (that transaction is the victim), and write its name (sess_a or sess_b) to /tmp/victim.txt.
+
+  - id: describe-cycle
+    title: Describe the wait cycle
+    instructions: steps/03-describe-cycle.md
+    hint: steps/03-hint.md
+    verify:
+      # Diagnosis-recording: the learner explains the cycle. Require the
+      # core concepts: both account ids and the words order/cycle/wait.
+      run: |
+        f=/tmp/diagnosis.txt
+        test -s "$f" || exit 1
+        grep -q '1' "$f" && grep -q '2' "$f" || exit 1
+        grep -Eqi 'order|opposite|reverse|cycle|circular' "$f" || exit 1
+        grep -Eqi 'wait|block|lock|for update' "$f"
+      timeout: 15s
+      failureMessage: In /tmp/diagnosis.txt, describe the cycle in your own words — mention rows 1 and 2, that each session locked one then waited for the other (opposite lock order), forming a cycle.
+
+  - id: fix-order
+    title: Fix with a consistent lock order
+    instructions: steps/04-fix-order.md
+    hint: steps/04-hint.md
+    verify:
+      # The FIXED script locks lowest id first regardless of direction.
+      # Run the same opposing pair through it: NO deadlock, BOTH commit
+      # (rc=0), and the money is conserved / balances still total 2000.
+      run: |
+        sh /tmp/run_pair.sh /tmp/fixed_transfer.sh "1 2 100" "2 1 100" >/dev/null 2>&1
+        # neither log may show a deadlock
+        if grep -qi 'deadlock detected' /tmp/sess_a.log /tmp/sess_b.log; then exit 1; fi
+        # both psql sessions must have exited 0
+        [ "$(cat /tmp/sess_a.rc 2>/dev/null)" = "0" ] || exit 1
+        [ "$(cat /tmp/sess_b.rc 2>/dev/null)" = "0" ] || exit 1
+        # total balance is conserved (the two transfers cancel out)
+        PGPASSWORD=lab psql -h db -U postgres -d bank -tAc \
+          "SELECT sum(balance) FROM accounts" 2>/dev/null | tr -d ' ' | grep -q '^2000'
+      timeout: 30s
+      successMessage: Both transfers committed with no deadlock — consistent lock order broke the cycle.
+      failureMessage: Run `sh /tmp/run_pair.sh /tmp/fixed_transfer.sh "1 2 100" "2 1 100"`. With ascending-id lock order there is no deadlock, both sessions commit (rc=0), and balances still sum to 2000.
+
+finish:
+  markdown: finish.md

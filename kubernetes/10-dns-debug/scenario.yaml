@@ -1,0 +1,140 @@
+apiVersion: labs.handsonn.dev/v1
+kind: Scenario
+id: dns-debug
+title: Debug Broken Service DNS
+summary: A client can resolve the orders Service but every request hangs. Trace Service to Endpoints to pod labels, find the mismatched selector, fix it, and watch traffic flow.
+difficulty: intermediate
+tags: [kubernetes, networking, dns, services, endpoints, debugging]
+duration: 25m
+topic: kubernetes
+issueType: debugging
+
+environment:
+  type: vcluster
+  # A healthy client and a healthy orders backend, but the orders Service
+  # selects app=order while the pods are labelled app=orders. The selector
+  # matches nothing, so Endpoints is empty and every request to the Service
+  # ClusterIP hangs (DNS resolves fine; there is just nowhere to route).
+  seed: |
+    apiVersion: apps/v1
+    kind: Deployment
+    metadata:
+      name: client
+      labels: { app: client }
+    spec:
+      replicas: 1
+      selector:
+        matchLabels: { app: client }
+      template:
+        metadata:
+          labels: { app: client }
+        spec:
+          containers:
+            - name: client
+              image: nicolaka/netshoot:latest
+              command: ["sleep", "infinity"]
+    ---
+    apiVersion: apps/v1
+    kind: Deployment
+    metadata:
+      name: orders
+      labels: { app: orders }
+    spec:
+      replicas: 2
+      selector:
+        matchLabels: { app: orders }
+      template:
+        metadata:
+          # The pods are labelled app=orders (plural).
+          labels: { app: orders }
+        spec:
+          containers:
+            - name: orders
+              image: nginx:1.27
+              ports:
+                - containerPort: 80
+    ---
+    apiVersion: v1
+    kind: Service
+    metadata:
+      name: orders
+      labels: { app: orders }
+    spec:
+      # BUG: selector app=order (singular) matches NO pod → Endpoints empty.
+      selector:
+        app: order
+      ports:
+        - port: 80
+          targetPort: 80
+
+session:
+  ttl: 60m
+
+steps:
+  - id: reproduce
+    title: Reproduce the broken request
+    instructions: steps/01-reproduce.md
+    hint: steps/01-hint.md
+    verify:
+      run: |
+        # Confirm the backend pods are actually Running (the app is healthy;
+        # only the Service wiring is broken). Two orders replicas should be up.
+        [ "$(kubectl get deploy orders -o jsonpath='{.status.readyReplicas}' 2>/dev/null)" = "2" ] \
+          && [ "$(kubectl get deploy client -o jsonpath='{.status.readyReplicas}' 2>/dev/null)" = "1" ]
+      timeout: 30s
+      failureMessage: Both orders replicas and the client should be Running. Wait for them, then curl the orders Service from the client to see it hang.
+
+  - id: endpoints
+    title: Follow Service to Endpoints
+    instructions: steps/02-endpoints.md
+    hint: steps/02-hint.md
+    verify:
+      run: |
+        # The learner records that the orders Service has NO endpoints — that is
+        # the smoking gun that DNS resolves but there is nowhere to route.
+        grep -qi "empty\|no endpoint\|none\|0 endpoint\|<none>" /tmp/diagnosis 2>/dev/null
+      failureMessage: Inspect `kubectl get endpoints orders`. Write what you found (the endpoint list is empty) to /tmp/diagnosis.
+
+  - id: rootcause
+    title: Find the selector mismatch
+    instructions: steps/03-rootcause.md
+    hint: steps/03-hint.md
+    verify:
+      run: |
+        # Verify the bug is still present (selector app=order, pods app=orders)
+        # AND the learner recorded the label mismatch as the root cause.
+        SEL="$(kubectl get svc orders -o jsonpath='{.spec.selector.app}' 2>/dev/null)"
+        [ "$SEL" = "order" ] || exit 0   # already fixed; don't block progress
+        grep -qi "selector\|label\|order\b\|orders" /tmp/rootcause 2>/dev/null
+      failureMessage: Compare the Service selector to the pod labels, then write the mismatch (svc selects app=order, pods are app=orders) to /tmp/rootcause.
+
+  - id: fix
+    title: Fix the selector
+    instructions: steps/04-fix.md
+    hint: steps/04-hint.md
+    verify:
+      run: |
+        # After the fix the Service must select app=orders AND populate at least
+        # one endpoint address from the running pods.
+        [ "$(kubectl get svc orders -o jsonpath='{.spec.selector.app}' 2>/dev/null)" = "orders" ] \
+          && kubectl get endpoints orders -o jsonpath='{.subsets[0].addresses[0].ip}' 2>/dev/null | grep -q .
+      timeout: 30s
+      failureMessage: Patch the orders Service selector to app=orders. `kubectl get endpoints orders` must then list at least one pod IP.
+
+  - id: verify
+    title: Confirm traffic flows
+    instructions: steps/05-verify.md
+    verify:
+      run: |
+        # The real completion criterion is that the fixed selector repopulated
+        # Endpoints — assert the OBJECT state (at least one pod IP under the
+        # orders Endpoints), NOT a live HTTP 200. Whether this vcluster actually
+        # routes ClusterIP traffic pod-to-pod is NOT guaranteed, so we grade the
+        # wiring and let the learner record the live-curl outcome as a diagnosis.
+        kubectl get endpoints orders -o jsonpath='{.subsets[*].addresses[*].ip}' 2>/dev/null | grep -q . \
+          && grep -qi "200\|curl\|orders\|route\|reach\|hang\|000\|timeout\|enforce\|vcluster" /tmp/verify 2>/dev/null
+      timeout: 30s
+      failureMessage: Confirm `kubectl get endpoints orders` lists pod IPs, curl orders from `kubectl exec deploy/client`, and record what you saw (200, or a note that this vcluster may not route ClusterIP traffic) to /tmp/verify.
+
+finish:
+  markdown: finish.md

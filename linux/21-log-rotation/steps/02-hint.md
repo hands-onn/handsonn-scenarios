@@ -1,0 +1,1 @@
+Use the here-doc in the step to drop the exact block into `/etc/logrotate.d/app`. All four directives must be present: `size 1M`, `rotate 5`, `compress`, `copytruncate`. Order inside the braces doesn't matter. The stanza header must be the real path `/var/log/app/app.log {`.

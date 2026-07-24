@@ -1,0 +1,1 @@
+Run the grouped query as the `postgres` superuser (your reserved slot still lets you in): `SELECT count(*), state FROM pg_stat_activity GROUP BY state`. The pile is `idle`. Save that word to /tmp/diagnosis (`echo "idle" > /tmp/diagnosis`).

@@ -1,0 +1,218 @@
+apiVersion: labs.handsonn.dev/v1
+kind: Scenario
+id: process-signals-advanced
+title: Signals and Job Control on a Live Daemon
+summary: A long-running daemon traps SIGHUP (reload) and SIGTERM (graceful cleanup). Drive it with real signals - reload it, freeze and thaw it with SIGSTOP/SIGCONT, then trigger a clean shutdown and confirm cleanup ran.
+difficulty: advanced
+tags: [linux, processes, signals, job-control, daemon, troubleshooting]
+duration: 25m
+topic: linux
+issueType: shell
+
+session:
+  ttl: 30m
+  quota:
+    cpu: "2"
+    memory: 2Gi
+    pods: 1
+
+environment:
+  type: linux
+  pods:
+    - name: shell
+      image: nicolaka/netshoot:latest
+      primary: true
+      command: ["sleep", "infinity"]
+      resources:
+        cpu: "500m"
+        memory: 512Mi
+  init:
+    # Launch a small "signal-daemon" that behaves like a real service:
+    #   - SIGHUP  -> reload config: append a line to /tmp/daemon.reload and
+    #                bump a counter in /tmp/daemon.reloads (so reloads are
+    #                COUNTABLE and idempotent to verify).
+    #   - SIGTERM -> graceful shutdown: drop a cleanup sentinel to
+    #                /tmp/daemon.cleanup, remove its own pidfile, then exit 0.
+    # SIGSTOP/SIGCONT are deliberately NOT trapped (they can't be) - the
+    # kernel freezes/thaws the process, which the learner observes via state.
+    #
+    # The daemon writes its OWN pidfile (/tmp/daemon.pid), exactly like a real
+    # service, and tags its argv "signal-daemon" so pgrep -f finds it. It is
+    # detached with nohup + & so it survives shell exec churn between steps.
+    - pod: shell
+      run: |
+        cat > /tmp/signal-daemon.sh <<'EOF'
+        #!/bin/sh
+        # A tiny daemon that models real reload + graceful-shutdown semantics.
+        RELOAD_LOG=/tmp/daemon.reload
+        RELOAD_CNT=/tmp/daemon.reloads
+        CLEANUP=/tmp/daemon.cleanup
+        PIDFILE=/tmp/daemon.pid
+
+        # Start from a known-clean slate every launch.
+        rm -f "$RELOAD_LOG" "$CLEANUP"
+        echo 0 > "$RELOAD_CNT"
+        echo "$$" > "$PIDFILE"
+
+        on_hup() {
+          n=$(cat "$RELOAD_CNT" 2>/dev/null || echo 0)
+          n=$((n + 1))
+          echo "$n" > "$RELOAD_CNT"
+          echo "reloaded config at $(date -u +%FT%TZ) (reload #$n)" >> "$RELOAD_LOG"
+        }
+
+        on_term() {
+          echo "graceful shutdown at $(date -u +%FT%TZ) - flushing state" > "$CLEANUP"
+          rm -f "$PIDFILE"
+          exit 0
+        }
+
+        trap on_hup HUP
+        trap on_term TERM
+
+        # Idle work loop. We background `sleep` and `wait` on it: under busybox
+        # ash a signal only interrupts `wait` (a foreground `sleep` would block
+        # trap delivery until it exits), so this makes SIGHUP/SIGTERM fire
+        # promptly - a classic interruptible daemon idle loop.
+        while true; do
+          sleep 1 &
+          wait "$!"
+        done
+        EOF
+        chmod +x /tmp/signal-daemon.sh
+        # Detach with setsid so the daemon leaves the init shell's session and
+        # survives it exiting. We deliberately do NOT use `nohup`: nohup sets
+        # SIGHUP to SIG_IGN, and busybox ash inherits that ignore disposition,
+        # which would silently defeat the daemon's own `trap ... HUP`. The
+        # script's path (/tmp/signal-daemon.sh) carries the token that
+        # `pgrep -f signal-daemon` matches, so we need no argv trickery.
+        setsid /bin/sh /tmp/signal-daemon.sh >/tmp/daemon.out 2>&1 </dev/null &
+        # Give it a moment to install traps and write its pidfile.
+        sleep 2
+
+steps:
+  - id: find-daemon
+    title: Locate the running daemon
+    instructions: steps/01-find-daemon.md
+    hint: steps/01-hint.md
+    verify:
+      # Real-state: the PID the learner recorded must (a) be alive and (b) be
+      # the signal-daemon (its argv contains "signal-daemon"). This proves
+      # they found the right process, not a stray sleep.
+      run: |
+        pid=$(cat /tmp/found_pid 2>/dev/null | tr -d '[:space:]')
+        test -n "$pid" || { echo "No PID in /tmp/found_pid"; exit 1; }
+        test -d "/proc/$pid" || { echo "PID $pid is not running"; exit 1; }
+        # A zombie still has a /proc entry but is not actually running.
+        st=$(awk '{print $3}' "/proc/$pid/stat" 2>/dev/null)
+        test "$st" != "Z" || { echo "PID $pid is a zombie, not the live daemon"; exit 1; }
+        tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null | grep -q 'signal-daemon' \
+          || { echo "PID $pid is not the signal-daemon"; exit 1; }
+        exit 0
+      failureMessage: >-
+        Find the daemon with `pgrep -af signal-daemon` (or read its pidfile at
+        /tmp/daemon.pid), then save just the number:
+        echo <PID> > /tmp/found_pid
+      timeout: 15s
+
+  - id: send-hup
+    title: Reload it with SIGHUP
+    instructions: steps/02-send-hup.md
+    hint: steps/02-hint.md
+    verify:
+      # Real-state: the daemon's HUP handler wrote a reload marker AND bumped
+      # its reload counter to at least 1. Both prove the trap actually fired -
+      # not that the process merely exists. The daemon must also still be alive
+      # (SIGHUP reloads, it does not kill).
+      run: |
+        pid=$(cat /tmp/found_pid 2>/dev/null | tr -d '[:space:]')
+        test -n "$pid" && test -d "/proc/$pid" \
+          || { echo "The daemon is not running - did it exit?"; exit 1; }
+        st=$(awk '{print $3}' "/proc/$pid/stat" 2>/dev/null)
+        test "$st" != "Z" || { echo "The daemon has exited (zombie) - SIGHUP should not kill it"; exit 1; }
+        test -s /tmp/daemon.reload \
+          || { echo "No reload marker yet at /tmp/daemon.reload"; exit 1; }
+        grep -q 'reloaded config' /tmp/daemon.reload \
+          || { echo "Reload marker present but unexpected content"; exit 1; }
+        n=$(cat /tmp/daemon.reloads 2>/dev/null | tr -dc '0-9')
+        test -n "$n" && test "$n" -ge 1 \
+          || { echo "Reload counter is still 0 - SIGHUP did not reach the daemon"; exit 1; }
+        exit 0
+      failureMessage: >-
+        Send SIGHUP to the daemon: `kill -HUP $(cat /tmp/found_pid)` (or
+        `kill -1 <PID>`). Its trap should append a line to /tmp/daemon.reload
+        and bump /tmp/daemon.reloads. Signal number 1 = SIGHUP.
+      timeout: 15s
+
+  - id: stop-and-cont
+    title: Freeze it with SIGSTOP, then thaw with SIGCONT
+    instructions: steps/03-stop-and-cont.md
+    hint: steps/03-hint.md
+    verify:
+      # SIGSTOP/SIGCONT cannot be trapped - the kernel handles them. So we
+      # verify via OBSERVED STATE: the learner records the process state letter
+      # they saw while it was stopped (must be T), and we independently confirm
+      # the process is now RUNNING again (state R or S) after SIGCONT, still the
+      # same live daemon. This is deterministic: state is a fact in /proc/PID/stat.
+      run: |
+        pid=$(cat /tmp/found_pid 2>/dev/null | tr -d '[:space:]')
+        test -n "$pid" && test -d "/proc/$pid" \
+          || { echo "The daemon is not running"; exit 1; }
+        # Learner-recorded evidence that they SAW the stopped state.
+        seen=$(cat /tmp/stopped_state 2>/dev/null | tr -d '[:space:]')
+        echo "$seen" | grep -qiE '^T' \
+          || { echo "Record the state letter you saw while STOPPED (T) into /tmp/stopped_state"; exit 1; }
+        # Independent live check: after SIGCONT the process is NOT stopped.
+        state=$(awk '{print $3}' "/proc/$pid/stat" 2>/dev/null)
+        test -n "$state" || { echo "Could not read process state"; exit 1; }
+        case "$state" in
+          T) echo "The daemon is still STOPPED (state T) - send SIGCONT to resume it"; exit 1 ;;
+          R|S|D) exit 0 ;;
+          *) echo "Unexpected process state: $state"; exit 1 ;;
+        esac
+      failureMessage: >-
+        Freeze it with `kill -STOP <PID>` and confirm its state is T with
+        `ps -o pid,stat,comm | grep -w <PID>` (or `awk '{print $3}' /proc/<PID>/stat`);
+        record that letter with `echo T > /tmp/stopped_state`. Then resume it
+        with `kill -CONT <PID>` so its state returns to S/R.
+      timeout: 15s
+
+  - id: graceful-term
+    title: Trigger a graceful shutdown with SIGTERM
+    instructions: steps/04-graceful-term.md
+    hint: steps/04-hint.md
+    verify:
+      # The finale, all real-state and deterministic:
+      #   1. the SIGTERM cleanup sentinel exists with the expected content
+      #      (proves the TERM trap ran, i.e. it shut down GRACEFULLY),
+      #   2. the daemon removed its own pidfile during cleanup,
+      #   3. the process is no longer alive.
+      # NB: PID 1 in this pod is `sleep infinity`, which does not reap
+      # children, so an exited daemon lingers as a ZOMBIE (state Z) with its
+      # /proc entry intact. "Terminated" therefore means: /proc absent OR
+      # state Z - never one of the live states (R/S/D/T).
+      run: |
+        pid=$(cat /tmp/found_pid 2>/dev/null | tr -d '[:space:]')
+        test -n "$pid" || { echo "No PID in /tmp/found_pid"; exit 1; }
+        test -s /tmp/daemon.cleanup \
+          || { echo "No cleanup sentinel at /tmp/daemon.cleanup - did the TERM trap run?"; exit 1; }
+        grep -q 'graceful shutdown' /tmp/daemon.cleanup \
+          || { echo "Cleanup sentinel present but unexpected content"; exit 1; }
+        if test -e /tmp/daemon.pid; then
+          echo "Pidfile /tmp/daemon.pid still exists - graceful cleanup did not remove it"; exit 1
+        fi
+        if test -d "/proc/$pid"; then
+          st=$(awk '{print $3}' "/proc/$pid/stat" 2>/dev/null)
+          if [ "$st" != "Z" ]; then
+            echo "PID $pid is still running (state $st) - it has not exited yet"; exit 1
+          fi
+        fi
+        exit 0
+      failureMessage: >-
+        Send SIGTERM: `kill $(cat /tmp/found_pid)` (SIGTERM is the default, = 15).
+        Its trap writes /tmp/daemon.cleanup, removes /tmp/daemon.pid, and exits 0.
+        Confirm the process is gone with `pgrep -f signal-daemon` (or `ps | grep -w <PID>`).
+      timeout: 15s
+
+finish:
+  markdown: finish.md

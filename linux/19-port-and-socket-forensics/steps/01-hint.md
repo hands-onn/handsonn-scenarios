@@ -1,0 +1,1 @@
+`nc -l 8080` blocks in the foreground — if it *does* start, that means the port was free (it isn't here). If it prints nothing and exits, check `$?`. The clearer error comes from `python3 -m http.server 8080`, which prints the Python traceback ending in `Address already in use`. After you've seen it, just `echo` the symptom to `/tmp/bind_result`.

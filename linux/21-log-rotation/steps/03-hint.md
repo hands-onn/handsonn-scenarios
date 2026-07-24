@@ -1,0 +1,1 @@
+`logrotate -f /etc/logrotate.d/app` forces the rotation. If it errors on the default state file, use a writable one: `logrotate -f -s /tmp/logrotate.status /etc/logrotate.d/app`. Add `-v` to see each action. After it runs, `ls /var/log/app/` should show `app.log.1` or `app.log.1.gz`.

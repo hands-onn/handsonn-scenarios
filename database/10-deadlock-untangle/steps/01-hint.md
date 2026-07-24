@@ -1,0 +1,1 @@
+Just run `sh /tmp/run_pair.sh /tmp/transfer.sh "1 2 100" "2 1 100"` — it launches both opposing transfers as background psql jobs and waits. After ~1-2s one session logs `ERROR: deadlock detected`. The check greps `/tmp/sess_a.log` and `/tmp/sess_b.log` for that phrase.

@@ -1,0 +1,1 @@
+The check reads `spec.serviceName` (must equal `db`) and `spec.replicas` (must equal `3`) directly off the StatefulSet object — you don't have to change anything, just confirm they're set. `kubectl get statefulset db -o yaml` shows the full spec.

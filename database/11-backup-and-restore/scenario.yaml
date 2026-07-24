@@ -1,0 +1,201 @@
+apiVersion: labs.handsonn.dev/v1
+kind: Scenario
+id: backup-and-restore
+title: Backup and Restore with pg_dump
+summary: Take a custom-format pg_dump of a populated schema, inspect it with pg_restore --list, survive a destructive DROP, then restore from the dump and confirm every row count matches.
+difficulty: intermediate
+tags: [database, postgres, backup, restore, pg_dump, pg_restore, disaster-recovery]
+duration: 30m
+topic: database
+issueType: backup-restore
+
+session:
+  ttl: 45m
+  quota:
+    cpu: "2"
+    memory: 2Gi
+    pods: 2
+
+environment:
+  type: linux
+  pods:
+    # netshoot ships psql but NOT pg_dump/pg_restore — the init step
+    # installs the full postgresql-client package (which bundles pg_dump,
+    # pg_restore and psql) so every command in this lab runs from here.
+    # verify.run defaults to this primary pod, so /tmp/backup.dump written
+    # here is the same file the checks read.
+    - name: shell
+      image: nicolaka/netshoot:latest
+      primary: true
+      command: ["sleep", "infinity"]
+      resources:
+        cpu: "500m"
+        memory: 512Mi
+
+    - name: db
+      # Matches the apk `postgresql-client` major (Alpine latest ships v18),
+      # so pg_dump/pg_restore ↔ server versions align — a newer client
+      # dumping a v15 server injects PG17+ GUCs (transaction_timeout) into
+      # the dump prologue that a v15 restore rejects with a red error.
+      image: postgres:18-alpine
+      expose: [5432]
+      # postgres' entrypoint chowns its data dir + drops to the postgres
+      # user — needs these caps to start under the drop-ALL baseline.
+      addCapabilities: [SETUID, SETGID, CHOWN]
+      env:
+        - name: POSTGRES_PASSWORD
+          value: lab
+        - name: POSTGRES_DB
+          value: store
+      resources:
+        cpu: "1"
+        memory: 1Gi
+
+  init:
+    - pod: shell
+      run: |
+        set -e
+        # netshoot has psql but not pg_dump/pg_restore; postgresql-client
+        # bundles all three. Egress to the Alpine repos is allowed.
+        apk add --no-cache postgresql-client >/dev/null 2>&1
+        # Wait for the db to accept connections.
+        for i in $(seq 1 30); do
+          PGPASSWORD=lab psql -h db -U postgres -d store -c 'SELECT 1' >/dev/null 2>&1 && break
+          sleep 2
+        done
+        # Seed a small multi-table schema with KNOWN, fixed row counts:
+        #   customers = 50, products = 200, orders = 500, order_items = 1500.
+        # Fixed generate_series ranges make the counts deterministic so the
+        # learner (and the verify) can compare post-restore counts exactly.
+        PGPASSWORD=lab psql -h db -U postgres -d store -v ON_ERROR_STOP=1 <<'SQL'
+        CREATE TABLE customers (
+          id    SERIAL PRIMARY KEY,
+          name  TEXT NOT NULL,
+          email TEXT NOT NULL UNIQUE
+        );
+        CREATE TABLE products (
+          id    SERIAL PRIMARY KEY,
+          sku   TEXT NOT NULL UNIQUE,
+          price NUMERIC(10,2) NOT NULL
+        );
+        CREATE TABLE orders (
+          id          SERIAL PRIMARY KEY,
+          customer_id INT NOT NULL REFERENCES customers(id),
+          placed_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+        );
+        CREATE TABLE order_items (
+          id         SERIAL PRIMARY KEY,
+          order_id   INT NOT NULL REFERENCES orders(id),
+          product_id INT NOT NULL REFERENCES products(id),
+          qty        INT NOT NULL
+        );
+
+        INSERT INTO customers (name, email)
+        SELECT 'Customer ' || g, 'cust' || g || '@example.com'
+        FROM generate_series(1, 50) g;
+
+        INSERT INTO products (sku, price)
+        SELECT 'SKU-' || g, (5 + (g % 90))::numeric
+        FROM generate_series(1, 200) g;
+
+        INSERT INTO orders (customer_id)
+        SELECT 1 + (g % 50)
+        FROM generate_series(1, 500) g;
+
+        INSERT INTO order_items (order_id, product_id, qty)
+        SELECT 1 + (g % 500), 1 + (g % 200), 1 + (g % 5)
+        FROM generate_series(1, 1500) g;
+
+        ANALYZE;
+        SQL
+
+steps:
+  - id: survey
+    title: Survey the data you must protect
+    instructions: steps/01-survey.md
+    hint: steps/01-hint.md
+    verify:
+      # Learner records the four baseline counts to /tmp/counts_before.
+      # We assert the file captured the true values so later comparisons
+      # have something real to check against.
+      run: |
+        set -e
+        test -f /tmp/counts_before
+        grep -q '^customers=50$'    /tmp/counts_before
+        grep -q '^products=200$'    /tmp/counts_before
+        grep -q '^orders=500$'      /tmp/counts_before
+        grep -q '^order_items=1500$' /tmp/counts_before
+      timeout: 20s
+      failureMessage: Query each table's row count and save them (e.g. customers=50) to /tmp/counts_before. The seeded counts are 50 / 200 / 500 / 1500.
+
+  - id: take-dump
+    title: Take a custom-format backup
+    instructions: steps/02-take-dump.md
+    hint: steps/02-hint.md
+    verify:
+      # A real .dump must exist and be a PostgreSQL custom-format archive.
+      # pg_restore --list only succeeds on a valid archive, so it doubles
+      # as an integrity check.
+      run: |
+        set -e
+        test -s /tmp/backup.dump
+        pg_restore --list /tmp/backup.dump >/dev/null 2>&1
+      timeout: 20s
+      failureMessage: Create a custom-format backup with `pg_dump -Fc -f /tmp/backup.dump`. It must be a non-empty archive that `pg_restore --list` can read.
+
+  - id: inspect-dump
+    title: Inspect the archive's table of contents
+    instructions: steps/03-inspect-dump.md
+    hint: steps/03-hint.md
+    verify:
+      # Prove the archive actually contains all four tables' data by
+      # reading its TOC — no live DB involved.
+      run: |
+        set -e
+        toc=$(pg_restore --list /tmp/backup.dump)
+        for t in customers products orders order_items; do
+          echo "$toc" | grep -Eiq "TABLE DATA[[:space:]]+public[[:space:]]+$t([[:space:]]|\$)"
+        done
+      timeout: 20s
+      failureMessage: Run `pg_restore --list /tmp/backup.dump` and confirm the TOC has TABLE DATA entries for customers, products, orders and order_items.
+
+  - id: destroy
+    title: Simulate the disaster
+    instructions: steps/04-destroy.md
+    hint: steps/04-hint.md
+    verify:
+      # The four tables must be gone from the live database.
+      run: |
+        PGPASSWORD=lab psql -h db -U postgres -d store -tAc \
+          "SELECT count(*) FROM information_schema.tables
+             WHERE table_schema='public'
+               AND table_name IN ('customers','products','orders','order_items')" \
+          2>/dev/null | grep -q '^0$'
+      timeout: 20s
+      failureMessage: Drop all four tables (DROP TABLE ... CASCADE) so information_schema shows none of them left in the public schema.
+
+  - id: restore
+    title: Restore from the backup and verify counts
+    instructions: steps/05-restore.md
+    hint: steps/05-hint.md
+    verify:
+      # Restore succeeded only if every table is back AND every row count
+      # matches the originals exactly.
+      run: |
+        set -e
+        counts=$(PGPASSWORD=lab psql -h db -U postgres -d store -tA <<'SQL'
+        SELECT 'customers=' || count(*) FROM customers;
+        SELECT 'products=' || count(*) FROM products;
+        SELECT 'orders=' || count(*) FROM orders;
+        SELECT 'order_items=' || count(*) FROM order_items;
+        SQL
+        )
+        echo "$counts" | grep -q '^customers=50$'
+        echo "$counts" | grep -q '^products=200$'
+        echo "$counts" | grep -q '^orders=500$'
+        echo "$counts" | grep -q '^order_items=1500$'
+      timeout: 30s
+      failureMessage: Restore with `pg_restore -d store /tmp/backup.dump`, then re-count. All four counts must match the originals (50 / 200 / 500 / 1500).
+
+finish:
+  markdown: finish.md

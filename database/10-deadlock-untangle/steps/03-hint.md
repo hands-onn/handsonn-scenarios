@@ -1,0 +1,1 @@
+Write a short explanation to `/tmp/diagnosis.txt`. It must contain the digits `1` and `2` (the two accounts), a word like `order`/`opposite`/`reverse`/`cycle`, and a word like `wait`/`lock`/`block`. Example: "sess_a locked row 1 then waited on row 2; sess_b locked row 2 then waited on row 1 — opposite order, a cycle."

@@ -1,0 +1,1 @@
+`kubectl get svc orders -o jsonpath='{.spec.selector}'` shows `app=order`, but `kubectl get pods --show-labels` shows the pods are `app=orders`. The selector is off by one letter, so it matches no pods. Write that mismatch to `/tmp/rootcause`.

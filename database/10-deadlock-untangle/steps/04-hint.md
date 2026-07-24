@@ -1,0 +1,1 @@
+Run `sh /tmp/run_pair.sh /tmp/fixed_transfer.sh "1 2 100" "2 1 100"`. The fixed script always locks the lower account id first, so both directions take locks in the same order — no cycle, both commit (`rc=0`), and `SELECT sum(balance) FROM accounts` stays 2000. The check does all three assertions for you.

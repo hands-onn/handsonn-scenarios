@@ -1,0 +1,1 @@
+Connect as the ordinary role: `psql -h db -U app -d shop -c 'SELECT 1'`. It fails because all 17 non-reserved slots are taken. Pipe the output (`2>&1 | tee /tmp/exhaustion`) so the check can see the "too many clients" / "reserved" wording. Do NOT free any slots yet.

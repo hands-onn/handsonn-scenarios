@@ -1,0 +1,1 @@
+`command -v logrotate` prints its path (expect `/usr/sbin/logrotate`). Then `stat -c %s /var/log/app/app.log > /tmp/logsize` writes just the byte count. `wc -c < /var/log/app/app.log` also works. The check wants a number over 1,000,000.

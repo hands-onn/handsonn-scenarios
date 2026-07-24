@@ -1,0 +1,160 @@
+apiVersion: labs.handsonn.dev/v1
+kind: Scenario
+id: log-rotation
+title: Rotate a Runaway Log with logrotate
+summary: A chatty app keeps a huge app.log open and never stops writing. Author an /etc/logrotate.d/app policy (size, rotate, compress, copytruncate), force a rotation, and confirm the archive exists while the live log keeps flowing.
+difficulty: intermediate
+tags: [linux, logging, logrotate, disk, observability, troubleshooting]
+duration: 25m
+topic: linux
+issueType: shell
+
+session:
+  ttl: 30m
+  quota:
+    cpu: "2"
+    memory: 2Gi
+    pods: 1
+
+environment:
+  type: linux
+  pods:
+    - name: shell
+      image: nicolaka/netshoot:latest
+      primary: true
+      command: ["sleep", "infinity"]
+      resources:
+        cpu: "500m"
+        memory: 512Mi
+  init:
+    # Seed a large, already-bloated log plus a background writer that
+    # holds the file OPEN and keeps appending. Holding the fd open is
+    # the whole reason `copytruncate` matters: a plain move+recreate
+    # would leave the writer scribbling into the (unlinked) old inode,
+    # so the "new" app.log would stay empty. copytruncate copies then
+    # truncates in place, keeping the existing fd valid.
+    - pod: shell
+      run: |
+        # netshoot is Alpine; logrotate is not in the base image. Install it
+        # at provisioning (needs Alpine package egress) so the lab's core
+        # tool is present — the `command -v logrotate` gate in step 2 then
+        # confirms it rather than dead-ending the learner.
+        apk add --no-cache logrotate >/dev/null 2>&1 \
+          || echo "WARN: apk add logrotate failed (no egress?)" >&2
+        mkdir -p /var/log/app
+        # ~2 MiB of pre-existing log so the file is clearly "large" and a
+        # size-based rotation triggers immediately on `logrotate -f`.
+        yes "$(date '+%Y-%m-%dT%H:%M:%S') INFO app: serving request id=seed" \
+          | head -n 20000 > /var/log/app/app.log
+        # Background writer: keeps the log fd OPEN and appends forever.
+        # Detached so it survives shell exec churn. Slow cadence so the
+        # file stays small right after a copytruncate.
+        nohup sh -c 'while true; do
+              echo "$(date "+%Y-%m-%dT%H:%M:%S") INFO app: heartbeat" >> /var/log/app/app.log
+              sleep 2
+            done' >/dev/null 2>&1 &
+        sleep 1
+        echo "seeded $(wc -l < /var/log/app/app.log) lines in /var/log/app/app.log" \
+          > /var/log/app/.seed-report 2>/dev/null || true
+
+steps:
+  - id: assess
+    title: Find the tool and size up the problem
+    instructions: steps/01-assess.md
+    hint: steps/01-hint.md
+    verify:
+      # Two gates: (1) logrotate must actually be on PATH in this image
+      # (this is the environment assumption we flag — a clean, early
+      # failure if the binary is missing), and (2) the learner records
+      # the current size of the log so they've looked at it.
+      run: |
+        command -v logrotate >/dev/null 2>&1 || exit 1
+        # Learner writes the app.log size in bytes to /tmp/logsize.
+        recorded=$(tr -dc '0-9' < /tmp/logsize 2>/dev/null)
+        test -n "$recorded" || exit 1
+        # Sanity: the seeded log really is large (well over 1 MiB).
+        test "$recorded" -gt 1000000
+      failureMessage: "Confirm the tool exists with `command -v logrotate`. Then run `stat -c %s /var/log/app/app.log` (or `wc -c`) and write just the byte count to /tmp/logsize — it should be over a million."
+
+  - id: write-policy
+    title: Author the logrotate policy
+    instructions: steps/02-write-policy.md
+    hint: steps/02-hint.md
+    verify:
+      # Assert the policy FILE exists and carries the four required
+      # directives. We normalize whitespace so `rotate  5` etc. still
+      # match, and check copytruncate specifically because the open-fd
+      # writer makes it mandatory here.
+      run: |
+        f=/etc/logrotate.d/app
+        test -f "$f" || exit 1
+        # The stanza must target our log.
+        grep -q '/var/log/app/app.log' "$f" || exit 1
+        # size <threshold>
+        grep -Eqi '(^|[[:space:]])size[[:space:]]+[0-9]+[kKmMgG]?([[:space:]]|$)' "$f" || exit 1
+        # rotate N
+        grep -Eqi '(^|[[:space:]])rotate[[:space:]]+[0-9]+([[:space:]]|$)' "$f" || exit 1
+        # compress
+        grep -Eqi '(^|[[:space:]])compress([[:space:]]|$)' "$f" || exit 1
+        # copytruncate
+        grep -Eqi '(^|[[:space:]])copytruncate([[:space:]]|$)' "$f"
+      failureMessage: "Create /etc/logrotate.d/app with a stanza for /var/log/app/app.log containing all four: `size`, `rotate N`, `compress`, and `copytruncate`. See the step for the exact block."
+
+  - id: rotate
+    title: Force a rotation
+    instructions: steps/03-rotate.md
+    hint: steps/03-hint.md
+    verify:
+      # Real-state: after a forced run, a first-generation archive must
+      # exist. compress may or may not have kicked in on the first pass
+      # (logrotate defaults to delaycompress OFF, but some builds differ),
+      # so accept either app.log.1 or app.log.1.gz.
+      run: |
+        test -f /var/log/app/app.log.1 || test -f /var/log/app/app.log.1.gz
+      timeout: 30s
+      failureMessage: "Run `logrotate -f /etc/logrotate.d/app` (force). Afterwards /var/log/app/app.log.1 (or app.log.1.gz once compressed) should exist. If logrotate refuses on config permissions, see the hint."
+
+  - id: truncated
+    title: Confirm the live log was truncated in place
+    instructions: steps/04-truncated.md
+    hint: steps/04-hint.md
+    verify:
+      # copytruncate proof: the archive holds the old bulk while the live
+      # app.log is now small. We compare sizes rather than trust a fixed
+      # threshold, since the background writer adds a few lines/sec.
+      run: |
+        live=/var/log/app/app.log
+        arch=/var/log/app/app.log.1
+        gz=/var/log/app/app.log.1.gz
+        test -f "$live" || exit 1
+        # The archive must exist (compressed or not) — proves a rotation ran.
+        test -f "$arch" || test -f "$gz" || exit 1
+        live_sz=$(stat -c %s "$live" 2>/dev/null || wc -c < "$live")
+        # Absolute gate ONLY: the live log is small (well under 512 KiB),
+        # proving the in-place copytruncate happened. We deliberately do NOT
+        # compare live vs archive size — once `compress` gzips the archive to
+        # a few KiB, the always-appending background writer can grow the live
+        # log past it within minutes, flipping a relative check false even
+        # though truncation worked. Absolute is stable.
+        test "$live_sz" -lt 524288
+      timeout: 30s
+      failureMessage: "The live /var/log/app/app.log should now be tiny (truncated in place) while /var/log/app/app.log.1[.gz] holds the old bulk. If the live log is still huge, copytruncate didn't apply — recheck the policy and re-run `logrotate -f`."
+
+  - id: still-flowing
+    title: Prove the writer kept flowing
+    instructions: steps/05-still-flowing.md
+    verify:
+      # The payoff of copytruncate: because the fd stayed valid, the
+      # background writer keeps appending to the SAME (now-truncated)
+      # app.log. Snapshot the size, wait, and require it to have grown.
+      run: |
+        f=/var/log/app/app.log
+        before=$(stat -c %s "$f" 2>/dev/null || wc -c < "$f")
+        sleep 6
+        after=$(stat -c %s "$f" 2>/dev/null || wc -c < "$f")
+        test -n "$before" && test -n "$after" && test "$after" -gt "$before"
+      timeout: 20s
+      failureMessage: "Watch the live log grow: `tail -f /var/log/app/app.log`. New heartbeat lines should still be landing there. If it never grows, the writer lost its fd (a move-based rotation without copytruncate would do that)."
+
+finish:
+  markdown: finish.md

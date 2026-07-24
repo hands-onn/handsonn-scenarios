@@ -1,0 +1,1 @@
+`kubectl patch hpa cpu-worker --type=merge -p '{"spec":{"maxReplicas":3}}'` sets the ceiling in one command. For the `/tmp/scaling-signal` file, any of these words satisfies the check: `replica`, `scale`, `top`, `metric`, `event`, or `describe` — describe *what you'd watch* to know the HPA scaled (e.g. REPLICAS climbing, SuccessfulRescale events, `kubectl top` utilization).

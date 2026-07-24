@@ -1,0 +1,1 @@
+The victim is whichever log — `/tmp/sess_a.log` or `/tmp/sess_b.log` — contains `ERROR: deadlock detected`. Run `grep -l 'deadlock detected' /tmp/sess_*.log` to see the filename, then `echo` that session's short name (`sess_a` or `sess_b`) into `/tmp/victim.txt`.

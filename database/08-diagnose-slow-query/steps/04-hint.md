@@ -1,0 +1,1 @@
+Re-run plain `EXPLAIN` on the join. The check runs the plan itself and fails only if it still finds `Seq Scan on line_items`. If it does: run `ANALYZE line_items` and confirm the index is on `order_id` (`\di line_items*`).

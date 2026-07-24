@@ -1,0 +1,1 @@
+Use `psql -c "EXPLAIN (ANALYZE, BUFFERS) <the join query>"` and redirect stdout to `/tmp/plan_before`. The check confirms the saved plan mentions both `orders` and `line_items`, i.e. you profiled the actual join.

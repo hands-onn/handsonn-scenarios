@@ -1,0 +1,1 @@
+Compare `stat -c %s /var/log/app/app.log` (should be small — a few KiB) against `stat -c %s /var/log/app/app.log.1` (or `.gz`, large). The live log must be smaller than the archive and under 512 KiB. If it's still multi-MiB, `copytruncate` isn't in the policy or logrotate didn't run — fix and re-run `logrotate -f /etc/logrotate.d/app`.

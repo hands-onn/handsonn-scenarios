@@ -1,0 +1,143 @@
+apiVersion: labs.handsonn.dev/v1
+kind: Scenario
+id: port-and-socket-forensics
+title: Who Is Holding Port 8080?
+summary: Your app can't start — "Address already in use". Use ss to find the squatter's PID, cross-check /proc, kill it, and bind your own listener.
+difficulty: intermediate
+tags: [linux, networking, sockets, ports, troubleshooting]
+duration: 20m
+topic: linux
+issueType: networking
+
+session:
+  ttl: 30m
+  quota:
+    cpu: "2"
+    memory: 2Gi
+    pods: 1
+
+environment:
+  type: linux
+  pods:
+    - name: shell
+      image: nicolaka/netshoot:latest
+      primary: true
+      command: ["sleep", "infinity"]
+      resources:
+        cpu: "500m"
+        memory: 512Mi
+  init:
+    # A rogue "squatter" grabs port 8080 before the learner ever gets there.
+    # We use python3's http.server so it has a distinctive, greppable cmdline
+    # in ss -tlnp and /proc/<pid>/cmdline. Detached with nohup + & so it
+    # survives shell exec churn, exactly like a real orphaned daemon would.
+    - pod: shell
+      run: |
+        nohup python3 -m http.server 8080 --bind 0.0.0.0 \
+          >/tmp/squatter.log 2>&1 &
+        # Give it a moment to actually bind the socket.
+        sleep 2
+
+steps:
+  - id: hit-eaddrinuse
+    title: Reproduce "Address already in use"
+    instructions: steps/01-hit-eaddrinuse.md
+    hint: steps/01-hint.md
+    verify:
+      # Diagnosis-recording: binding *fails*, so we can't assert your own
+      # listener yet. Confirm you saw and recorded the EADDRINUSE symptom.
+      run: |
+        grep -qiE 'eaddrinuse|address (already )?in use|in use' /tmp/bind_result 2>/dev/null
+      failureMessage: >-
+        Try to start a listener on 8080 (e.g. `nc -l 8080` or
+        `python3 -m http.server 8080`), watch it fail, then record what you
+        saw with: echo "EADDRINUSE - address already in use" > /tmp/bind_result
+
+  - id: find-owner
+    title: Find the PID holding 8080
+    instructions: steps/02-find-owner.md
+    hint: steps/02-hint.md
+    verify:
+      # Real-state cross-check: the PID you saved must (a) still be alive and
+      # (b) actually be the process bound to :8080. We confirm the recorded
+      # PID's cmdline is the squatter (http.server), which is what ss shows
+      # as the owner of 8080.
+      run: |
+        pid=$(cat /tmp/port_pid 2>/dev/null | tr -d '[:space:]')
+        test -n "$pid" || { echo "No PID in /tmp/port_pid"; exit 1; }
+        test -d "/proc/$pid" || { echo "PID $pid is not a running process"; exit 1; }
+        tr '\0' ' ' < "/proc/$pid/cmdline" | grep -q 'http.server'
+      failureMessage: >-
+        Run `ss -tlnp` and find the line for `*:8080` (or `0.0.0.0:8080`).
+        Read the pid=NNN out of the users:(("...",pid=NNN,...)) field and
+        save it: echo NNN > /tmp/port_pid
+
+  - id: cross-check-proc
+    title: Confirm identity via /proc
+    instructions: steps/03-cross-check-proc.md
+    verify:
+      # The recorded cmdline must match the live /proc entry for that PID —
+      # proves you inspected the actual process, not guessed.
+      run: |
+        pid=$(cat /tmp/port_pid 2>/dev/null | tr -d '[:space:]')
+        test -n "$pid" || { echo "No PID in /tmp/port_pid"; exit 1; }
+        test -s /tmp/port_cmd || { echo "Write the cmdline to /tmp/port_cmd"; exit 1; }
+        grep -q 'http.server' /tmp/port_cmd \
+          && tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null | grep -q 'http.server'
+      failureMessage: >-
+        Dump the owner's command line and save it. Because the fields are
+        NUL-separated, use tr to make it readable:
+        tr '\0' ' ' < /proc/$(cat /tmp/port_pid)/cmdline > /tmp/port_cmd
+
+  - id: kill-squatter
+    title: Evict the squatter
+    instructions: steps/04-kill-squatter.md
+    hint: steps/04-hint.md
+    verify:
+      # Two real-state assertions: the recorded PID is gone AND nothing is
+      # still listening on 8080.
+      run: |
+        pid=$(cat /tmp/port_pid 2>/dev/null | tr -d '[:space:]')
+        test -n "$pid" || { echo "No PID in /tmp/port_pid"; exit 1; }
+        if test -d "/proc/$pid"; then
+          echo "PID $pid is still running"; exit 1
+        fi
+        if ss -tlnH 'sport = :8080' | grep -q .; then
+          echo "Something is still listening on :8080"; exit 1
+        fi
+        exit 0
+      timeout: 15s
+      failureMessage: >-
+        Kill the squatter with `kill $(cat /tmp/port_pid)` and confirm
+        `ss -tln 'sport = :8080'` prints nothing. Escalate to `kill -9` if it
+        ignores SIGTERM.
+
+  - id: bind-own
+    title: Claim the port for your own listener
+    instructions: steps/05-bind-own.md
+    hint: steps/05-hint.md
+    verify:
+      # A listener must be up on 8080 again — and it must NOT be the old
+      # squatter PID (proving you started a fresh process, not just failed to
+      # kill anything). We accept any listener on :8080 whose PID differs from
+      # the recorded one.
+      run: |
+        ss -tlnH 'sport = :8080' | grep -q . \
+          || { echo "Nothing is listening on :8080 yet"; exit 1; }
+        old=$(cat /tmp/port_pid 2>/dev/null | tr -d '[:space:]')
+        newpids=$(ss -tlnpH 'sport = :8080' | grep -oE 'pid=[0-9]+' | grep -oE '[0-9]+' | sort -u)
+        test -n "$newpids" || { echo "Could not read the owning PID from ss"; exit 1; }
+        for p in $newpids; do
+          if [ "$p" = "$old" ]; then
+            echo "PID $p is the old squatter — it is still holding 8080"; exit 1
+          fi
+        done
+        exit 0
+      timeout: 15s
+      failureMessage: >-
+        Start your own listener on 8080 in the background, e.g.
+        `nohup python3 -m http.server 8080 >/tmp/mine.log 2>&1 &`, then
+        confirm with `ss -tlnp 'sport = :8080'`.
+
+finish:
+  markdown: finish.md

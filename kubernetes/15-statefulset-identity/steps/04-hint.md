@@ -1,0 +1,1 @@
+The volumeClaimTemplate is named `data`, so PVCs are `data-db-0`, `data-db-1`, `data-db-2`. The check only needs those PVC objects to exist — `Pending` is fine (no default StorageClass or WaitForFirstConsumer). List them with `kubectl get pvc -l app=db`.

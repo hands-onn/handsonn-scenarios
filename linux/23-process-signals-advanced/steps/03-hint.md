@@ -1,0 +1,1 @@
+`kill -STOP <PID>` freezes it → STAT column shows `T`. Save that with `echo T > /tmp/stopped_state`. Then `kill -CONT <PID>` resumes it (STAT goes back to `S`/`R`). This step only passes once the process is NO LONGER in state T, so don't forget the SIGCONT.

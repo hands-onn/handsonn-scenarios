@@ -1,0 +1,1 @@
+The expensive node is the `Seq Scan` on the side of the join whose join key has no index. That's `line_items` (`order_id` is un-indexed). Write a line naming `line_items` to `/tmp/diagnosis`. The check also confirms your `/tmp/plan_before` actually contains a `Seq Scan`.

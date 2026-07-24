@@ -1,0 +1,1 @@
+Signal names and numbers are interchangeable: `kill -HUP`, `kill -SIGHUP`, and `kill -1` all send SIGHUP. Run `kill -l` to list them. After sending, `cat /tmp/daemon.reloads` must show at least 1 and the daemon (`/proc/<PID>`) must still exist.

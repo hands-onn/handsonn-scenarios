@@ -1,0 +1,1 @@
+`SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE usename='app' AND state='idle';` kills every leaked session in one shot and releases its slot. The check confirms fewer than 3 idle `app` connections remain.

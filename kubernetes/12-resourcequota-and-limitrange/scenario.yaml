@@ -1,0 +1,133 @@
+apiVersion: labs.handsonn.dev/v1
+kind: Scenario
+id: resourcequota-and-limitrange
+title: Namespace Governance with ResourceQuota and LimitRange
+summary: Cap a namespace with a ResourceQuota, set container defaults with a LimitRange, watch defaults inject into a bare pod, get bounced by quota when you scale too far, then right-size to fit.
+difficulty: intermediate
+tags: [kubernetes, resourcequota, limitrange, governance, admission]
+duration: 30m
+topic: kubernetes
+issueType: governance
+
+environment:
+  type: vcluster
+  # A namespace with a workload but NO governance yet. The team ships a
+  # Deployment whose containers declare no requests/limits — the exact
+  # thing a ResourceQuota+LimitRange is meant to tame.
+  seed: |
+    apiVersion: v1
+    kind: Namespace
+    metadata:
+      name: team-a
+    ---
+    apiVersion: apps/v1
+    kind: Deployment
+    metadata:
+      name: shop
+      namespace: team-a
+      labels: { app: shop }
+    spec:
+      replicas: 1
+      # maxSurge:0 so a rollout under a tight ResourceQuota drains an old
+      # (higher-request) pod BEFORE admitting a new one — the default
+      # RollingUpdate surges first, which the quota rejects, deadlocking
+      # the right-sizing step at replicas that never converge.
+      strategy:
+        type: RollingUpdate
+        rollingUpdate:
+          maxSurge: 0
+          maxUnavailable: 1
+      selector:
+        matchLabels: { app: shop }
+      template:
+        metadata:
+          labels: { app: shop }
+        spec:
+          containers:
+            - name: shop
+              image: nginx:1.27
+              ports:
+                - containerPort: 80
+              # BUG-BY-OMISSION: no resources block at all.
+
+session:
+  ttl: 60m
+
+steps:
+  - id: inspect-namespace
+    title: Inspect the ungoverned namespace
+    instructions: steps/01-inspect-namespace.md
+    verify:
+      run: |
+        # The team-a namespace exists and currently has NO ResourceQuota and
+        # NO LimitRange. Confirm the learner recorded that observation.
+        kubectl get ns team-a >/dev/null 2>&1 || exit 1
+        test -s /tmp/before && grep -qi "none\|no quota\|no limitrange\|ungoverned\|empty" /tmp/before
+      failureMessage: Confirm team-a has no ResourceQuota and no LimitRange yet, then write what you found to /tmp/before.
+
+  - id: apply-governance
+    title: Apply a ResourceQuota and a LimitRange
+    instructions: steps/02-apply-governance.md
+    hint: steps/02-hint.md
+    verify:
+      run: |
+        # ResourceQuota must cap requests.cpu, requests.memory and pods.
+        rc=$(kubectl -n team-a get resourcequota team-quota -o jsonpath='{.spec.hard.requests\.cpu}' 2>/dev/null)
+        rm=$(kubectl -n team-a get resourcequota team-quota -o jsonpath='{.spec.hard.requests\.memory}' 2>/dev/null)
+        rp=$(kubectl -n team-a get resourcequota team-quota -o jsonpath='{.spec.hard.pods}' 2>/dev/null)
+        # LimitRange must define container defaults + defaultRequest.
+        dr=$(kubectl -n team-a get limitrange team-limits -o jsonpath='{.spec.limits[?(@.type=="Container")].defaultRequest.cpu}' 2>/dev/null)
+        df=$(kubectl -n team-a get limitrange team-limits -o jsonpath='{.spec.limits[?(@.type=="Container")].default.memory}' 2>/dev/null)
+        [ -n "$rc" ] && [ -n "$rm" ] && [ -n "$rp" ] && [ -n "$dr" ] && [ -n "$df" ]
+      timeout: 30s
+      failureMessage: Create ResourceQuota team-quota (requests.cpu, requests.memory, pods) and LimitRange team-limits (Container default + defaultRequest) in namespace team-a.
+
+  - id: prove-defaults
+    title: Prove the LimitRange injects defaults
+    instructions: steps/03-prove-defaults.md
+    hint: steps/03-hint.md
+    verify:
+      run: |
+        # The shop Deployment declares no resources, yet its running pod must
+        # now carry LimitRange-injected requests AND limits. Assert on the
+        # live pod, not the Deployment template (the template is still bare).
+        req=$(kubectl -n team-a get pod -l app=shop \
+          -o jsonpath='{.items[0].spec.containers[0].resources.requests.cpu}' 2>/dev/null)
+        lim=$(kubectl -n team-a get pod -l app=shop \
+          -o jsonpath='{.items[0].spec.containers[0].resources.limits.memory}' 2>/dev/null)
+        [ -n "$req" ] && [ -n "$lim" ]
+      timeout: 40s
+      failureMessage: Roll the shop pods so a fresh pod passes through the LimitRange, then confirm the running pod shows injected requests.cpu and limits.memory.
+
+  - id: hit-quota
+    title: Scale past the quota and capture the rejection
+    instructions: steps/04-hit-quota.md
+    hint: steps/04-hint.md
+    verify:
+      run: |
+        # ResourceQuota is enforced at admission by the ReplicaSet controller,
+        # so an over-quota scale surfaces as a Deployment/ReplicaSet condition
+        # and fewer-than-desired pods. Confirm the learner recorded the
+        # forbidden/exceeded quota message.
+        test -s /tmp/rejection && grep -qi "exceeded\|forbidden\|quota" /tmp/rejection
+      timeout: 30s
+      failureMessage: Scale shop past the quota, read the FailedCreate event mentioning "exceeded quota", and save that message to /tmp/rejection.
+
+  - id: right-size
+    title: Right-size so the replicas fit
+    instructions: steps/05-right-size.md
+    hint: steps/05-hint.md
+    verify:
+      run: |
+        # Deployment must be scaled to at least 3 replicas and, after
+        # right-sizing requests, all desired replicas are Ready AND the quota
+        # is no longer fully consumed / over budget (used pods == ready).
+        desired=$(kubectl -n team-a get deploy shop -o jsonpath='{.spec.replicas}' 2>/dev/null)
+        ready=$(kubectl -n team-a get deploy shop -o jsonpath='{.status.readyReplicas}' 2>/dev/null)
+        usedpods=$(kubectl -n team-a get resourcequota team-quota -o jsonpath='{.status.used.pods}' 2>/dev/null)
+        [ "${desired:-0}" -ge 3 ] && [ "${ready:-0}" = "${desired:-0}" ] && [ "${usedpods:-0}" = "${ready:-0}" ]
+      timeout: 60s
+      failureMessage: Lower the per-pod requests (via the Deployment or the LimitRange defaults) so all 3+ replicas become Ready under the quota.
+
+finish:
+  markdown: finish.md

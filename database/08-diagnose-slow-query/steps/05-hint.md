@@ -1,0 +1,1 @@
+Save the new `EXPLAIN (ANALYZE, BUFFERS)` output to `/tmp/plan_after`. The check re-runs the plan live to confirm `line_items` is reached via an index, and also confirms `/tmp/plan_after` exists and mentions an index.

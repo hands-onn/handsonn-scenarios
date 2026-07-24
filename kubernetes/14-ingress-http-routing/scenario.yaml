@@ -1,0 +1,154 @@
+apiVersion: labs.handsonn.dev/v1
+kind: Scenario
+id: ingress-http-routing
+title: Ingress L7 HTTP Routing
+summary: Route HTTP by path and host to two backend Services with a single Ingress — ingressClassName, path rules, and a host rule.
+difficulty: intermediate
+tags: [kubernetes, networking, ingress, routing, http]
+duration: 30m
+topic: kubernetes
+issueType: networking
+
+environment:
+  type: vcluster
+  # Two independent apps, each fronted by a ClusterIP Service. The learner
+  # authors a single Ingress that fans HTTP out to both by path and host.
+  # NOTE: no ingress controller runs in the vcluster, so we verify the
+  # Ingress OBJECT (rules/paths/backends/host) — not live HTTP.
+  seed: |
+    apiVersion: apps/v1
+    kind: Deployment
+    metadata:
+      name: app-a
+      labels: { app: app-a }
+    spec:
+      replicas: 1
+      selector:
+        matchLabels: { app: app-a }
+      template:
+        metadata:
+          labels: { app: app-a }
+        spec:
+          containers:
+            - name: web
+              image: nginx:1.27
+              ports:
+                - containerPort: 80
+    ---
+    apiVersion: v1
+    kind: Service
+    metadata:
+      name: app-a
+      labels: { app: app-a }
+    spec:
+      selector: { app: app-a }
+      ports:
+        - name: http
+          port: 80
+          targetPort: 80
+    ---
+    apiVersion: apps/v1
+    kind: Deployment
+    metadata:
+      name: app-b
+      labels: { app: app-b }
+    spec:
+      replicas: 1
+      selector:
+        matchLabels: { app: app-b }
+      template:
+        metadata:
+          labels: { app: app-b }
+        spec:
+          containers:
+            - name: web
+              image: nginx:1.27
+              ports:
+                - containerPort: 80
+    ---
+    apiVersion: v1
+    kind: Service
+    metadata:
+      name: app-b
+      labels: { app: app-b }
+    spec:
+      selector: { app: app-b }
+      ports:
+        - name: http
+          port: 80
+          targetPort: 80
+
+session:
+  ttl: 60m
+
+steps:
+  - id: survey
+    title: Survey the backends
+    instructions: steps/01-survey.md
+    verify:
+      run: |
+        # Both Deployments should be Ready and both Services should have an
+        # endpoint before we try to route to them.
+        [ "$(kubectl get deploy app-a -o jsonpath='{.status.readyReplicas}' 2>/dev/null)" = "1" ] \
+          && [ "$(kubectl get deploy app-b -o jsonpath='{.status.readyReplicas}' 2>/dev/null)" = "1" ] \
+          && kubectl get endpoints app-a -o jsonpath='{.subsets[0].addresses[0].ip}' 2>/dev/null | grep -q . \
+          && kubectl get endpoints app-b -o jsonpath='{.subsets[0].addresses[0].ip}' 2>/dev/null | grep -q .
+      timeout: 30s
+      failureMessage: Both app-a and app-b Deployments must be Ready with Services that have endpoints. They are pre-seeded — run kubectl get deploy,svc,endpoints.
+
+  - id: path-routing
+    title: Create an Ingress with path rules
+    instructions: steps/02-path-routing.md
+    hint: steps/02-hint.md
+    verify:
+      run: |
+        # An Ingress named 'apps' must fan /a -> app-a and /b -> app-b on
+        # port 80, and it must declare ingressClassName: nginx. Scan every
+        # rule's paths so this holds no matter how rules are ordered.
+        [ "$(kubectl get ingress apps -o jsonpath='{.spec.ingressClassName}' 2>/dev/null)" = "nginx" ] \
+          && kubectl get ingress apps -o jsonpath='{.spec.rules[*].http.paths[?(@.path=="/a")].backend.service.name}' 2>/dev/null | grep -qw app-a \
+          && kubectl get ingress apps -o jsonpath='{.spec.rules[*].http.paths[?(@.path=="/b")].backend.service.name}' 2>/dev/null | grep -qw app-b \
+          && kubectl get ingress apps -o jsonpath='{.spec.rules[*].http.paths[?(@.path=="/a")].backend.service.port.number}' 2>/dev/null | grep -qw 80
+      timeout: 30s
+      failureMessage: Create an Ingress named "apps" with ingressClassName nginx that routes path /a to service app-a:80 and /b to service app-b:80.
+
+  - id: host-rule
+    title: Add a host-based rule
+    instructions: steps/03-host-rule.md
+    hint: steps/03-hint.md
+    verify:
+      run: |
+        # A rule with host apps.handsonn.local must send its root path "/"
+        # to app-a:80. Locate the rule by host and assert its backend.
+        [ "$(kubectl get ingress apps -o jsonpath='{.spec.rules[?(@.host=="apps.handsonn.local")].http.paths[0].backend.service.name}' 2>/dev/null)" = "app-a" ] \
+          && [ "$(kubectl get ingress apps -o jsonpath='{.spec.rules[?(@.host=="apps.handsonn.local")].http.paths[0].backend.service.port.number}' 2>/dev/null)" = "80" ]
+      timeout: 30s
+      failureMessage: Add a rule to the "apps" Ingress with host apps.handsonn.local whose path "/" routes to service app-a:80.
+
+  - id: pathtype
+    title: Set pathType and confirm the full object
+    instructions: steps/04-pathtype.md
+    hint: steps/04-hint.md
+    verify:
+      run: |
+        # Every path in the Ingress must set pathType Prefix (required by the
+        # networking.k8s.io/v1 API for controllers to route deterministically).
+        MISSING=$(kubectl get ingress apps -o jsonpath='{range .spec.rules[*].http.paths[*]}{.pathType}{"\n"}{end}' 2>/dev/null | grep -vc '^Prefix$')
+        [ "$MISSING" = "0" ] \
+          && kubectl get ingress apps -o jsonpath='{range .spec.rules[*].http.paths[*]}{.pathType}{"\n"}{end}' 2>/dev/null | grep -q '^Prefix$'
+      timeout: 30s
+      failureMessage: Set pathType Prefix on every path across all rules in the "apps" Ingress.
+
+  - id: explain
+    title: Explain why no traffic flows
+    instructions: steps/05-explain.md
+    hint: steps/05-hint.md
+    verify:
+      run: |
+        # This is a diagnosis-recording step: the learner explains why curling
+        # the Ingress in THIS cluster returns nothing (no controller installed).
+        grep -qi "controller\|no ingress\|not installed\|nothing implement" /tmp/why-no-traffic 2>/dev/null
+      failureMessage: Write to /tmp/why-no-traffic why HTTP does not actually route here (hint - what component reads Ingress objects and programs the data plane?).
+
+finish:
+  markdown: finish.md

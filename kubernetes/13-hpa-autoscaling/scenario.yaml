@@ -1,0 +1,122 @@
+apiVersion: labs.handsonn.dev/v1
+kind: Scenario
+id: hpa-autoscaling
+title: Autoscaling with a HorizontalPodAutoscaler
+summary: Give a Deployment CPU requests, attach an HPA (min 1, max 5, target CPU), read its status, and understand why scaling needs metrics-server.
+difficulty: advanced
+tags: [kubernetes, autoscaling, hpa, scaling, resources]
+duration: 30m
+topic: kubernetes
+issueType: scaling
+
+environment:
+  type: vcluster
+  # A Deployment that requests CPU (an HPA on CPU utilization is
+  # meaningless without a request to compute the percentage against).
+  # It runs a tiny CPU-burning loop so that IF metrics-server is present,
+  # utilization is non-trivial — but the lab never depends on that.
+  seed: |
+    apiVersion: apps/v1
+    kind: Deployment
+    metadata:
+      name: cpu-worker
+      labels: { app: cpu-worker }
+    spec:
+      replicas: 1
+      selector:
+        matchLabels: { app: cpu-worker }
+      template:
+        metadata:
+          labels: { app: cpu-worker }
+        spec:
+          containers:
+            - name: cpu-worker
+              image: busybox:1.36
+              # A gentle busy loop so there's real CPU to measure.
+              command: ["sh", "-c", "while true; do :; done"]
+              resources:
+                requests:
+                  cpu: 100m
+                  memory: 32Mi
+                limits:
+                  cpu: 300m
+                  memory: 64Mi
+
+session:
+  ttl: 60m
+
+steps:
+  - id: inspect-requests
+    title: Confirm the Deployment requests CPU
+    instructions: steps/01-inspect-requests.md
+    verify:
+      run: |
+        # An HPA on CPU utilization needs a per-container CPU *request* to
+        # compute a percentage against. Assert the request exists and the
+        # learner recorded it.
+        req=$(kubectl get deploy cpu-worker -o jsonpath='{.spec.template.spec.containers[0].resources.requests.cpu}' 2>/dev/null)
+        [ -n "$req" ] && test -s /tmp/cpu-request
+      timeout: 30s
+      failureMessage: The cpu-worker container must have a CPU request. Inspect it and save the value to /tmp/cpu-request.
+
+  - id: create-hpa
+    title: Create the HorizontalPodAutoscaler
+    instructions: steps/02-create-hpa.md
+    hint: steps/02-hint.md
+    verify:
+      run: |
+        # The HPA must target the cpu-worker Deployment with min 1 / max 5.
+        kind=$(kubectl get hpa cpu-worker -o jsonpath='{.spec.scaleTargetRef.kind}' 2>/dev/null)
+        name=$(kubectl get hpa cpu-worker -o jsonpath='{.spec.scaleTargetRef.name}' 2>/dev/null)
+        min=$(kubectl get hpa cpu-worker -o jsonpath='{.spec.minReplicas}' 2>/dev/null)
+        max=$(kubectl get hpa cpu-worker -o jsonpath='{.spec.maxReplicas}' 2>/dev/null)
+        [ "$kind" = "Deployment" ] && [ "$name" = "cpu-worker" ] && [ "$min" = "1" ] && [ "$max" = "5" ]
+      timeout: 30s
+      failureMessage: Create an HPA named "cpu-worker" targeting Deployment cpu-worker with minReplicas 1 and maxReplicas 5.
+
+  - id: target-metric
+    title: Verify the target CPU metric
+    instructions: steps/03-target-metric.md
+    hint: steps/03-hint.md
+    verify:
+      run: |
+        # autoscaling/v2 stores the CPU target under spec.metrics[]. The
+        # convenience form `kubectl autoscale --cpu-percent` produces the
+        # same object. Accept either the v2 metrics[] shape or the v1
+        # targetCPUUtilizationPercentage field.
+        v2=$(kubectl get hpa cpu-worker -o jsonpath='{.spec.metrics[?(@.resource.name=="cpu")].resource.target.averageUtilization}' 2>/dev/null)
+        v1=$(kubectl get hpa cpu-worker -o jsonpath='{.spec.targetCPUUtilizationPercentage}' 2>/dev/null)
+        [ -n "$v2" ] || [ -n "$v1" ]
+      timeout: 30s
+      failureMessage: The HPA must define a target CPU utilization (e.g. --cpu-percent=50 or a Resource metric on cpu).
+
+  - id: read-status
+    title: Read the HPA status and check for metrics
+    instructions: steps/04-read-status.md
+    hint: steps/04-hint.md
+    verify:
+      run: |
+        # metrics-server is NOT guaranteed in this vcluster. So we do NOT
+        # assert actual scaling. We (a) confirm the HPA reports a status
+        # (currentReplicas is populated once the controller reconciles) and
+        # (b) confirm the learner recorded whether `kubectl top` worked.
+        cur=$(kubectl get hpa cpu-worker -o jsonpath='{.status.currentReplicas}' 2>/dev/null)
+        [ -n "$cur" ] && test -s /tmp/metrics-status
+      timeout: 40s
+      failureMessage: Describe the HPA, run `kubectl top pods`, then record whether metrics were available to /tmp/metrics-status.
+
+  - id: tune-target
+    title: Tune the autoscaling target
+    instructions: steps/05-tune-target.md
+    hint: steps/05-hint.md
+    verify:
+      run: |
+        # Learner lowers maxReplicas to 3 (a deliberate, verifiable edit)
+        # and records what they'd watch to know scaling actually happened.
+        max=$(kubectl get hpa cpu-worker -o jsonpath='{.spec.maxReplicas}' 2>/dev/null)
+        [ "$max" = "3" ] && grep -qi "replica\|scale\|top\|metric\|event\|describe" /tmp/scaling-signal 2>/dev/null
+      timeout: 30s
+      failureMessage: Lower the HPA maxReplicas to 3 and write to /tmp/scaling-signal what you'd watch to confirm scaling happened.
+
+finish:
+  markdown: finish.md

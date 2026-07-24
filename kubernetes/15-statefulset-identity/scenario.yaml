@@ -1,0 +1,160 @@
+apiVersion: labs.handsonn.dev/v1
+kind: Scenario
+id: statefulset-identity
+title: StatefulSet Stable Identity
+summary: A headless Service plus a StatefulSet give each replica a sticky name, DNS record, and volume. Inspect the identity model, then prove it survives a pod delete.
+difficulty: advanced
+tags: [kubernetes, statefulset, headless-service, storage, dns, identity]
+duration: 30m
+topic: kubernetes
+issueType: config
+
+environment:
+  type: vcluster
+  # A headless Service (clusterIP: None) fronts a 3-replica StatefulSet.
+  # The StatefulSet uses a volumeClaimTemplate so each pod gets its own PVC.
+  # Note: whether the PVCs actually reach Bound depends on a default
+  # StorageClass existing + its binding mode. The object shape is stable
+  # regardless; the scenario asserts shape and treats Bound as a soft check.
+  seed: |
+    apiVersion: v1
+    kind: Service
+    metadata:
+      name: db
+      labels: { app: db }
+    spec:
+      clusterIP: None
+      selector: { app: db }
+      ports:
+        - name: pg
+          port: 5432
+          targetPort: 5432
+    ---
+    apiVersion: apps/v1
+    kind: StatefulSet
+    metadata:
+      name: db
+      labels: { app: db }
+    spec:
+      serviceName: db
+      replicas: 3
+      # Parallel (not the default OrderedReady): without a working default
+      # StorageClass in the vcluster, data-db-0 never Binds → db-0 never
+      # Ready → under OrderedReady db-1/db-2 are NEVER CREATED, breaking the
+      # ordinals/volumes/survive checks. Parallel creates all pods + PVCs at
+      # once so the object-shape assertions hold regardless of binding.
+      podManagementPolicy: Parallel
+      selector:
+        matchLabels: { app: db }
+      template:
+        metadata:
+          labels: { app: db }
+        spec:
+          terminationGracePeriodSeconds: 5
+          containers:
+            - name: db
+              image: busybox:1.36
+              command: ["sh", "-c", "echo $(hostname) booted; sleep infinity"]
+              ports:
+                - name: pg
+                  containerPort: 5432
+              volumeMounts:
+                - name: data
+                  mountPath: /data
+      volumeClaimTemplates:
+        - metadata:
+            name: data
+          spec:
+            accessModes: ["ReadWriteOnce"]
+            resources:
+              requests:
+                storage: 100Mi
+
+session:
+  ttl: 60m
+
+steps:
+  - id: identity
+    title: Read the identity contract
+    instructions: steps/01-identity.md
+    hint: steps/01-hint.md
+    verify:
+      run: |
+        # The StatefulSet must be pinned to the headless Service by name
+        # and declare 3 replicas. This is the identity contract.
+        [ "$(kubectl get statefulset db -o jsonpath='{.spec.serviceName}' 2>/dev/null)" = "db" ] \
+          && [ "$(kubectl get statefulset db -o jsonpath='{.spec.replicas}' 2>/dev/null)" = "3" ]
+      timeout: 30s
+      failureMessage: The StatefulSet `db` must set spec.serviceName=db and spec.replicas=3. Inspect it with `kubectl get statefulset db -o yaml`.
+
+  - id: ordinals
+    title: Confirm ordered pod naming
+    instructions: steps/02-ordinals.md
+    hint: steps/02-hint.md
+    verify:
+      run: |
+        # StatefulSet pods are named <sts>-<ordinal>: db-0, db-1, db-2.
+        # Names are deterministic even before every replica is Ready.
+        for i in 0 1 2; do
+          kubectl get pod "db-$i" >/dev/null 2>&1 || exit 1
+        done
+        # And they must belong to the StatefulSet (controlled by it).
+        [ "$(kubectl get pod db-0 -o jsonpath='{.metadata.ownerReferences[0].kind}' 2>/dev/null)" = "StatefulSet" ]
+      timeout: 60s
+      failureMessage: Expected pods db-0, db-1, db-2 owned by the StatefulSet. List them with `kubectl get pods -l app=db`.
+
+  - id: headless
+    title: Inspect the headless Service and per-pod DNS
+    instructions: steps/03-headless.md
+    hint: steps/03-hint.md
+    verify:
+      run: |
+        # A headless Service has clusterIP: None. That is what makes DNS
+        # return each pod's own A record instead of a single VIP.
+        [ "$(kubectl get service db -o jsonpath='{.spec.clusterIP}' 2>/dev/null)" = "None" ] \
+          && kubectl get service db -o jsonpath='{.spec.selector.app}' 2>/dev/null | grep -qx db
+      timeout: 30s
+      failureMessage: The Service `db` must be headless (spec.clusterIP=None) and select app=db. Check with `kubectl get service db -o yaml`.
+
+  - id: volumes
+    title: Verify per-pod stable storage
+    instructions: steps/04-volumes.md
+    hint: steps/04-hint.md
+    verify:
+      run: |
+        # The volumeClaimTemplate must produce one PVC per pod, named
+        # data-db-0/1/2. The PVC objects always exist once the pods are
+        # created; whether they reach Bound depends on the StorageClass,
+        # so Bound is checked softly (informational, never fails the step).
+        set -e
+        [ "$(kubectl get statefulset db -o jsonpath='{.spec.volumeClaimTemplates[0].metadata.name}' 2>/dev/null)" = "data" ]
+        for i in 0 1 2; do
+          kubectl get pvc "data-db-$i" >/dev/null 2>&1 || { echo "missing PVC data-db-$i"; exit 1; }
+        done
+        # Soft check: report Bound status but do not fail on Pending.
+        for i in 0 1 2; do
+          phase=$(kubectl get pvc "data-db-$i" -o jsonpath='{.status.phase}' 2>/dev/null)
+          echo "data-db-$i: ${phase:-Unknown}"
+        done
+        exit 0
+      timeout: 60s
+      failureMessage: "Expected one PVC per pod from the volumeClaimTemplate: data-db-0, data-db-1, data-db-2. If they show Pending that is OK (no default StorageClass / WaitForFirstConsumer). List them with `kubectl get pvc -l app=db`."
+
+  - id: survive
+    title: Prove identity survives a delete
+    instructions: steps/05-survive.md
+    hint: steps/05-hint.md
+    verify:
+      run: |
+        # After deleting db-1, the controller recreates a pod with the SAME
+        # name db-1 and reattaches the SAME PVC data-db-1. Identity is sticky.
+        set -e
+        kubectl get pod db-1 >/dev/null 2>&1 || { echo "db-1 not present"; exit 1; }
+        # The recreated pod must still reference the original claim.
+        claim=$(kubectl get pod db-1 -o jsonpath='{.spec.volumes[?(@.name=="data")].persistentVolumeClaim.claimName}' 2>/dev/null)
+        [ "$claim" = "data-db-1" ]
+      timeout: 90s
+      failureMessage: Delete pod db-1 (`kubectl delete pod db-1`) and wait — the StatefulSet must recreate db-1 still bound to PVC data-db-1. Watch with `kubectl get pods -l app=db -w`.
+
+finish:
+  markdown: finish.md

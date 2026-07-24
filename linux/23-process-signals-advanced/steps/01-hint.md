@@ -1,0 +1,1 @@
+`pgrep -af signal-daemon` gives you `PID cmdline`. Take the leading number and save it: `pgrep -f signal-daemon | head -1 > /tmp/found_pid`. Verify it's alive with `test -d /proc/$(cat /tmp/found_pid) && echo alive`.

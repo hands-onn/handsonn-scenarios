@@ -1,0 +1,174 @@
+apiVersion: labs.handsonn.dev/v1
+kind: Scenario
+id: network-policy-isolation
+title: Isolate Pods with NetworkPolicy
+summary: Lock down a backend so only the frontend can reach it. Start from open connectivity, apply default-deny-ingress, then an allow-from app=frontend rule.
+difficulty: advanced
+tags: [kubernetes, networking, networkpolicy, security, isolation]
+duration: 30m
+topic: kubernetes
+issueType: security
+
+environment:
+  type: vcluster
+  # Three workloads in the default namespace:
+  #   frontend (nginx) — the ONLY client that should reach backend.
+  #   backend  (nginx) — the workload we will isolate.
+  #   client   (netshoot, sleep) — a stand-in for "some other pod" that
+  #                                 must be denied once policy is in place.
+  # Services front frontend and backend so DNS names resolve.
+  # NO NetworkPolicy is seeded — the learner creates them.
+  seed: |
+    apiVersion: apps/v1
+    kind: Deployment
+    metadata:
+      name: frontend
+      labels: { app: frontend }
+    spec:
+      replicas: 1
+      selector:
+        matchLabels: { app: frontend }
+      template:
+        metadata:
+          labels: { app: frontend }
+        spec:
+          containers:
+            - name: nginx
+              image: nginx:1.27
+              ports:
+                - containerPort: 80
+    ---
+    apiVersion: v1
+    kind: Service
+    metadata:
+      name: frontend
+    spec:
+      selector: { app: frontend }
+      ports:
+        - port: 80
+          targetPort: 80
+    ---
+    apiVersion: apps/v1
+    kind: Deployment
+    metadata:
+      name: backend
+      labels: { app: backend }
+    spec:
+      replicas: 1
+      selector:
+        matchLabels: { app: backend }
+      template:
+        metadata:
+          labels: { app: backend }
+        spec:
+          containers:
+            - name: nginx
+              image: nginx:1.27
+              ports:
+                - containerPort: 80
+    ---
+    apiVersion: v1
+    kind: Service
+    metadata:
+      name: backend
+    spec:
+      selector: { app: backend }
+      ports:
+        - port: 80
+          targetPort: 80
+    ---
+    apiVersion: apps/v1
+    kind: Deployment
+    metadata:
+      name: client
+      labels: { app: client }
+    spec:
+      replicas: 1
+      selector:
+        matchLabels: { app: client }
+      template:
+        metadata:
+          labels: { app: client }
+        spec:
+          containers:
+            - name: shell
+              image: nicolaka/netshoot:latest
+              command: ["sleep", "infinity"]
+
+session:
+  ttl: 60m
+
+steps:
+  - id: baseline
+    title: Confirm connectivity is wide open
+    instructions: steps/01-baseline.md
+    hint: steps/01-hint.md
+    verify:
+      run: |
+        # All three Deployments must be Ready before we start restricting
+        # traffic, and the learner must record the open-connectivity baseline.
+        [ "$(kubectl get deploy backend -o jsonpath='{.status.readyReplicas}' 2>/dev/null)" = "1" ] \
+          && [ "$(kubectl get deploy frontend -o jsonpath='{.status.readyReplicas}' 2>/dev/null)" = "1" ] \
+          && [ "$(kubectl get deploy client -o jsonpath='{.status.readyReplicas}' 2>/dev/null)" = "1" ] \
+          && grep -qi "open\|both\|reach\|allow\|no policy\|200" /tmp/baseline 2>/dev/null
+      timeout: 90s
+      failureMessage: Wait for frontend, backend, and client to be Ready, curl backend from both, and record what you saw in /tmp/baseline.
+
+  - id: default-deny
+    title: Apply default-deny-ingress on the backend
+    instructions: steps/02-default-deny.md
+    hint: steps/02-hint.md
+    verify:
+      run: |
+        # A NetworkPolicy must select the backend pods (app=backend) and
+        # declare an Ingress policyType with NO ingress rules (deny-all-in:
+        # .spec.ingress absent or []). We assert the OBJECT shape here, not
+        # live packet drops — this vcluster's CNI may not enforce netpol.
+        kubectl get networkpolicy -o json 2>/dev/null \
+          | jq -e '.items[]
+                   | select(.spec.podSelector.matchLabels.app == "backend")
+                   | select(.spec.policyTypes | index("Ingress"))
+                   | select((.spec.ingress == null) or (.spec.ingress == []))' >/dev/null 2>&1
+      timeout: 30s
+      failureMessage: Create a NetworkPolicy whose podSelector matches app=backend, with policyTypes [Ingress] and NO ingress rules (this denies all inbound traffic to backend).
+
+  - id: allow-frontend
+    title: Allow ingress only from the frontend
+    instructions: steps/03-allow-frontend.md
+    hint: steps/03-hint.md
+    verify:
+      run: |
+        # A NetworkPolicy selecting app=backend must have an ingress rule
+        # whose 'from' includes a podSelector matching app=frontend, and it
+        # should scope the allowed port to TCP/80. Assert the object shape.
+        kubectl get networkpolicy -o json 2>/dev/null \
+          | jq -e '.items[]
+                   | select(.spec.podSelector.matchLabels.app == "backend")
+                   | select(.spec.ingress != null)
+                   | .spec.ingress[]
+                   | select(.from != null)
+                   | select(.from[].podSelector.matchLabels.app == "frontend")
+                   | select(.ports != null)
+                   | .ports[]
+                   | select((.port == 80) and ((.protocol // "TCP") == "TCP"))' >/dev/null 2>&1
+      timeout: 30s
+      failureMessage: Add a NetworkPolicy on app=backend with an ingress rule allowing from podSelector app=frontend on TCP port 80.
+
+  - id: observe
+    title: Test the allow and the deny
+    instructions: steps/04-observe.md
+    hint: steps/04-hint.md
+    verify:
+      run: |
+        # Diagnosis-record: whether the CNI enforces NetworkPolicy in this
+        # vcluster is NOT guaranteed, so we grade UNDERSTANDING of the
+        # intended allow (frontend->backend) vs deny (client->backend), plus
+        # the fallback reasoning if enforcement is absent.
+        grep -qi "frontend" /tmp/observe 2>/dev/null \
+          && grep -qi "client" /tmp/observe 2>/dev/null \
+          && grep -qi "allow\|deny\|block\|timeout\|reach\|enforce\|cni\|200" /tmp/observe 2>/dev/null
+      timeout: 30s
+      failureMessage: From the frontend and client pods, curl backend, then write your observed (or intended) allow/deny result — and whether this CNI enforced it — to /tmp/observe.
+
+finish:
+  markdown: finish.md

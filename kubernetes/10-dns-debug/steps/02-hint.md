@@ -1,0 +1,1 @@
+Run `kubectl get endpoints orders`. A working Service lists one IP per backing pod; this one shows `<none>`. Write that observation (the endpoint list is empty) to `/tmp/diagnosis`, e.g. `echo "no endpoints" > /tmp/diagnosis`.
