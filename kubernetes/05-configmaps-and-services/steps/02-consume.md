@@ -31,10 +31,10 @@ spec:
 YAML
 ```
 
-Verify the env landed inside a pod:
+Verify the env landed inside a pod. You can `exec` straight into the
+Deployment — kubectl picks a ready pod for you, no name-copying needed:
 
 ```bash
 kubectl rollout status deployment/web
-POD=$(kubectl get pods -l app=web -o name | head -1)
-kubectl exec $POD -- printenv GREETING
+kubectl exec deploy/web -- printenv GREETING
 ```

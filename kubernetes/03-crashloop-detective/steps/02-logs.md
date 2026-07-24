@@ -2,19 +2,20 @@
 
 Two tools, always in this order:
 
-**1. Logs** — what did the container say before it died?
+**1. Logs** — what did the container say before it died? Address the pod
+by its label instead of copy-pasting a random name:
 
 ```bash
-kubectl logs $(cat /tmp/podname)
+kubectl logs -l app=api
 # If it already restarted, see the PREVIOUS container's logs:
-kubectl logs $(cat /tmp/podname) --previous
+kubectl logs -l app=api --previous
 ```
 
 **2. Describe** — what does Kubernetes see (exit code, events)?
 
 ```bash
-kubectl describe pod $(cat /tmp/podname) | sed -n '/Containers:/,/Events:/p'
-kubectl describe pod $(cat /tmp/podname) | tail -15
+kubectl describe pod -l app=api | sed -n '/Containers:/,/Events:/p'
+kubectl describe pod -l app=api | tail -15
 ```
 
 Look at `Last State: Terminated`, `Reason: Error`, `Exit Code: 1`. The

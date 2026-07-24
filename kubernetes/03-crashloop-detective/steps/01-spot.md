@@ -11,9 +11,16 @@ You'll see the `api-*` pod with a high `RESTARTS` count and status
 restarts it, it exits again — and Kubernetes backs off (waits longer
 between each restart) to avoid hammering.
 
-Save the pod's name for later:
+You don't need to memorize that random `api-xxxxx` suffix — select the
+pod by its label instead:
 
 ```bash
-kubectl get pods -l app=api -o name | head -1 | cut -d/ -f2 > /tmp/podname
+kubectl get pods -l app=api
+```
+
+Stash the name so this scenario can check your progress:
+
+```bash
+kubectl get pods -l app=api -o name | cut -d/ -f2 > /tmp/podname
 cat /tmp/podname
 ```
